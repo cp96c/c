@@ -77,7 +77,7 @@ def fetch_model(points, hourly):
         "models": MODEL,
         "wind_speed_unit": "kn",
         "timezone": "UTC",
-        "forecast_hours": HORIZON_H + 2,
+        "forecast_hours": HORIZON_H + 3,
     }
     r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=40)
     if r.status_code != 200:
@@ -108,6 +108,19 @@ def fetch_all(points):
         if ok:
             _merge(series, fetch_model(points, ok))
     return series
+
+
+def trim_past(series, now):
+    """Open-Meteo parte dall'ora corrente: la prima voce puo' riferirsi a un'ora gia' finita. La scarto."""
+    ref = now.strftime("%Y-%m-%dT%H:%M")
+    for s in series:
+        h = s.get("hourly", {})
+        times = h.get("time", [])
+        k = sum(1 for _ in __import__("itertools").takewhile(lambda t: t <= ref, times))
+        if k:
+            for key in list(h):
+                if isinstance(h[key], list):
+                    h[key] = h[key][k:]
 
 
 def missing_vars(series):
@@ -285,6 +298,7 @@ th{font-size:13px;text-align:left;padding:4px}td{padding:3px;vertical-align:top}
 .s{font-size:12px;color:var(--mut)}
 pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .warn{border-left:4px solid #c0392b}
+.stale{color:#c0392b;font-weight:700;font-size:14px}
 .hd{display:flex;gap:8px;align-items:center;margin-bottom:6px}.sn{font-size:18px}
 .sc{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
 .sc svg{flex:1 1 200px;max-width:270px;height:auto;border:1px solid var(--bd);border-radius:8px;background:var(--mapbg)}
@@ -449,6 +463,12 @@ def render(points, metars, now, missing=()):
     liru_ph = f'<b>{center["ph"]}</b> entro le {center["ph_time"]}' if center["ph"] else "nessun fenomeno"
     order = sorted(SECTORS, key=lambda sc: (-max(RANK.get(by[(sc, r)]["ph"], 0) for r in RINGS_NM), list(SECTORS).index(sc)))
     cards = "".join(sector_card(sc, by) for sc in order)
+    age_js = ('<div id="age" class="mut"></div><script>(function(){var t=EPOCH*1000;function u(){'
+              'var m=Math.round((Date.now()-t)/60000),e=document.getElementById("age");'
+              'if(m>30){e.className="stale";e.textContent="ATTENZIONE: dati vecchi di "+m+" min. '
+              'GitHub ha ritardato l\'aggiornamento: non fidarti di questa pagina.";}'
+              'else{e.className="mut";e.textContent="Dati generati "+m+" min fa";}}'
+              'u();setInterval(u,20000);})();</script>').replace("EPOCH", str(int(now.timestamp())))
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
@@ -458,7 +478,8 @@ def render(points, metars, now, missing=()):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.2</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.3</div>
+{age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
@@ -478,6 +499,7 @@ def main():
     series = fetch_all(points)
     if len(series) != len(points):
         raise RuntimeError(f"Attesi {len(points)} punti, ricevuti {len(series)}")
+    trim_past(series, now)
     analyse(points, series)
     missing = missing_vars(series)
     metars = fetch_metar()
