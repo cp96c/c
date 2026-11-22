@@ -162,6 +162,26 @@ def wind_level(gust_kt):
     return 0 if gust_kt < 20 else 1 if gust_kt < 30 else 2 if gust_kt < 40 else 3
 
 
+def to_nm(lat, lon):
+    """Posizione in NM rispetto a LIRU: (x verso est, y verso nord)."""
+    return ((lon - CENTER[1]) * math.cos(math.radians(CENTER[0])) * 60.0, (lat - CENTER[0]) * 60.0)
+
+
+def eta_liru(p, max_miss_nm=10.0, max_min=120.0):
+    """Minuti per raggiungere LIRU spostandosi in linea retta con il moto stimato; None se non ci passa."""
+    if p["ring"] == 0 or not p["mkt"] or p["mkt"] < 5:
+        return None
+    m = math.radians(p["mdeg"])
+    ux, uy = math.sin(m), math.cos(m)
+    x, y = to_nm(p["lat"], p["lon"])
+    along = -(x * ux + y * uy)                 # distanza lungo la traiettoria fino al punto piu' vicino a LIRU
+    miss = abs(x * uy - y * ux)                # distanza minima da LIRU
+    if along <= 0 or miss > max_miss_nm:
+        return None
+    mins = along / p["mkt"] * 60.0
+    return mins if mins <= max_min else None
+
+
 def compass(deg):
     return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int((deg + 22.5) // 45) % 8]
 
@@ -219,6 +239,7 @@ def analyse(points, series):
         codes = [phenomenon(h, i) for i in range(HORIZON_H)]
         ranked = [(RANK[c], c) for c in codes if c]
         p["ph"], p["ph_i"], p["ph_time"], p["motion"] = None, None, None, None
+        p["mdeg"], p["mkt"], p["eta"] = None, None, None
         if ranked:
             p["ph"] = max(ranked)[1]
             p["ph_i"] = codes.index(p["ph"])
@@ -227,6 +248,8 @@ def analyse(points, series):
             d, v = _at(h, "wind_direction_700hPa", p["ph_i"]), _at(h, "wind_speed_700hPa", p["ph_i"])
             if d is not None and v is not None:
                 p["motion"] = (compass((d + 180) % 360), v)   # verso dove va, stimato dal vento a 700 hPa
+                p["mdeg"], p["mkt"] = (d + 180) % 360, v
+                p["eta"] = eta_liru(p)
     return points
 
 
@@ -242,9 +265,13 @@ def regime(points):
 # ---------------------------------------------------------------- pagina
 CSS = """
 :root{--bg:#f6f7f9;--fg:#15181c;--mut:#5b6470;--card:#fff;--bd:#d9dde3;
---c0:#cfe9d4;--c1:#fff1b3;--c2:#ffd0a0;--c3:#f5a3a3;--cn:#e3e5e8}
+--c0:#cfe9d4;--c1:#fff1b3;--c2:#ffd0a0;--c3:#f5a3a3;--cn:#e3e5e8;
+--mapbg:#f3f1ea;--lake:#bcd7ee;--wedge:rgba(70,110,200,.12);
+--m0:#4caf50;--m1:#e6c200;--m2:#f08a24;--m3:#d32f2f;--mn:#aab1b9}
 @media (prefers-color-scheme:dark){:root{--bg:#101215;--fg:#e8eaed;--mut:#9aa3ad;--card:#1a1d21;--bd:#2c3137;
---c0:#24432b;--c1:#4d4519;--c2:#5a3a17;--c3:#5e2424;--cn:#2a2d31}}
+--c0:#24432b;--c1:#4d4519;--c2:#5a3a17;--c3:#5e2424;--cn:#2a2d31;
+--mapbg:#1b1d20;--lake:#1f3a52;--wedge:rgba(120,160,255,.14);
+--m0:#4caf50;--m1:#e6c200;--m2:#f08a24;--m3:#ef5350;--mn:#6b737c}}
 *{box-sizing:border-box}
 body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif;max-width:640px;margin:auto}
 h1{font-size:18px;margin:4px 0}h2{font-size:15px;margin:16px 0 6px}
@@ -258,6 +285,18 @@ th{font-size:13px;text-align:left;padding:4px}td{padding:3px;vertical-align:top}
 .s{font-size:12px;color:var(--mut)}
 pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .warn{border-left:4px solid #c0392b}
+.hd{display:flex;gap:8px;align-items:center;margin-bottom:6px}.sn{font-size:18px}
+.sc{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
+.sc svg{flex:1 1 200px;max-width:270px;height:auto;border:1px solid var(--bd);border-radius:8px;background:var(--mapbg)}
+.info{flex:1 1 190px}.ring{margin:0 0 9px}.ring .b{display:inline-block;margin-right:4px}
+svg .coast{fill:none;stroke:var(--fg);stroke-width:1.3;opacity:.75}svg .lake{fill:var(--lake)}
+svg .wedge{fill:var(--wedge);stroke:var(--mut);stroke-width:1}
+svg .arc{fill:none;stroke:var(--mut);stroke-width:.8;stroke-dasharray:3 3}
+svg .t{font-size:9px;fill:var(--fg);paint-order:stroke;stroke:var(--mapbg);stroke-width:2.5px}
+svg .tb{font-size:10px;font-weight:700}svg .ap{fill:var(--mut)}svg .liru{fill:var(--fg)}
+svg .pt{stroke:var(--fg);stroke-width:1.5}
+svg .m0{fill:var(--m0)}svg .m1{fill:var(--m1)}svg .m2{fill:var(--m2)}svg .m3{fill:var(--m3)}svg .mn{fill:var(--mn)}
+svg .arw{stroke:var(--fg);stroke-width:2.2;stroke-linecap:round}svg .ah{fill:var(--fg)}
 """
 
 
@@ -276,68 +315,158 @@ def cell(p):
             f'<div class="s">CAPE {fmt(p["cape"])} · raff {fmt(p["gust"])} kt · pioggia {fmt(p["precip"], 1)}</div></td>')
 
 
-def pheno_section(points, missing):
-    groups = {}
-    for p in points:
-        if p.get("ph"):
-            groups.setdefault(p["ph"], []).append(p)
-    if not groups:
-        body = '<div class="b c0">Nessun fenomeno significativo nel modello nelle prossime ore.</div>'
+AIRPORTS = {"LIRF": (41.800, 12.239), "LIRA": (41.799, 12.595), "LIRE": (41.654, 12.445),
+            "LIRG": (41.994, 12.727), "LIRV": (42.430, 12.064), "LIRL": (41.542, 12.909)}
+MAP_ALWAYS = False     # True = disegna la mappa anche per i settori senza fenomeni
+
+
+def pheno_cls(code):
+    if not code:
+        return None
+    rk = RANK[code]
+    return 3 if rk >= 9 else 2 if rk >= 6 else 1 if rk >= 3 else 0
+
+
+def _polar(r, brg):
+    a = math.radians(brg)
+    return (r * math.sin(a), r * math.cos(a))
+
+
+def sector_map(sec, by):
+    """Mappa schematica 64x64 NM del settore: costa, lago, anelli 25/50 NM, punti, frecce di moto."""
+    brg, span = SECTORS[sec], 64.0
+    k = 200.0 / span
+    cx, cy = _polar(30, brg)
+    x0, y1 = cx - span / 2, cy + span / 2
+
+    def tp(x, y):
+        return ((x - x0) * k, (y1 - y) * k)
+
+    def pt(x, y):
+        u, v = tp(x, y)
+        return f"{u:.1f},{v:.1f}"
+
+    def geo(q):
+        return pt(*to_nm(q[1], q[0]))
+
+    e = [f'<clipPath id="cl{sec}"><rect width="200" height="200"/></clipPath><g clip-path="url(#cl{sec})">']
+    for ring in GEO["lakes"]:
+        e.append(f'<polygon class="lake" points="{" ".join(geo(q) for q in ring)}"/>')
+    for line in GEO["coast"]:
+        e.append(f'<polyline class="coast" points="{" ".join(geo(q) for q in line)}"/>')
+    arc = [brg - 22.5 + 4.5 * i for i in range(11)]
+    e.append(f'<polygon class="wedge" points="{pt(0, 0)} {" ".join(pt(*_polar(50, a)) for a in arc)}"/>')
+    for r in RINGS_NM:
+        e.append(f'<polyline class="arc" points="{" ".join(pt(*_polar(r, a)) for a in arc)}"/>')
+        lx, ly = tp(*_polar(r, brg + 17))
+        e.append(f'<text class="t" x="{lx:.0f}" y="{ly:.0f}">{r}</text>')
+    for icao, (la, lo) in AIRPORTS.items():
+        ax, ay = tp(*to_nm(la, lo))
+        if 6 < ax < 190 and 6 < ay < 194:
+            e.append(f'<rect class="ap" x="{ax - 2:.0f}" y="{ay - 2:.0f}" width="4" height="4"/>'
+                     f'<text class="t" x="{ax + 4:.0f}" y="{ay + 3:.0f}">{icao}</text>')
+    ox, oy = tp(0, 0)
+    e.append(f'<circle class="liru" cx="{ox:.0f}" cy="{oy:.0f}" r="4"/>'
+             f'<text class="t tb" x="{ox + 6:.0f}" y="{oy - 5:.0f}">LIRU</text>')
+    for r in RINGS_NM:
+        p = by[(sec, r)]
+        x, y = to_nm(p["lat"], p["lon"])
+        u, v = tp(x, y)
+        cls = pheno_cls(p["ph"])
+        e.append(f'<circle class="pt m{"n" if cls is None else cls}" cx="{u:.1f}" cy="{v:.1f}" r="6"/>')
+        if p["ph"]:
+            e.append(f'<text class="t tb" text-anchor="middle" x="{u:.0f}" y="{v - 10:.0f}">{p["ph"]}</text>')
+        if p["ph"] and p["mdeg"] is not None:
+            m = math.radians(p["mdeg"])
+            length = min(p["mkt"] / 2.0, 26.0)          # NM percorse in 30 minuti
+            eu, ev = tp(x + length * math.sin(m), y + length * math.cos(m))
+            while length > 6 and not (8 < eu < 192 and 8 < ev < 192):   # freccia dentro la mappa
+                length *= 0.9
+                eu, ev = tp(x + length * math.sin(m), y + length * math.cos(m))
+            dx, dy = eu - u, ev - v
+            n = math.hypot(dx, dy) or 1.0
+            dx, dy = dx / n, dy / n
+            bx, by_ = eu - 8 * dx, ev - 8 * dy
+            e.append(f'<line class="arw" x1="{u:.1f}" y1="{v:.1f}" x2="{bx:.1f}" y2="{by_:.1f}"/>'
+                     f'<polygon class="ah" points="{eu:.1f},{ev:.1f} {bx - 4 * dy:.1f},{by_ + 4 * dx:.1f} '
+                     f'{bx + 4 * dy:.1f},{by_ - 4 * dx:.1f}"/>')
+    e.append('</g><text class="t tb" x="6" y="13">N↑</text>')
+    return f'<svg viewBox="0 0 200 200" role="img" aria-label="Mappa settore {sec}">{"".join(e)}</svg>'
+
+
+def sector_card(sec, by):
+    pts = [by[(sec, r)] for r in RINGS_NM]
+    worst = max(pts, key=lambda p: RANK.get(p["ph"], 0))
+    has = worst["ph"] is not None
+    if has:
+        head = (f'<div class="hd"><b class="sn">{sec}</b>'
+                f'<span class="b c{pheno_cls(worst["ph"])}"><b>{worst["ph"]}</b></span>'
+                f'<span class="s">{worst["ring"]} NM, entro le {worst["ph_time"]}</span></div>')
     else:
-        body = ""
-        for code in sorted(groups, key=lambda c: RANK[c], reverse=True):
-            rk = RANK[code]
-            cls = 3 if rk >= 9 else 2 if rk >= 6 else 1 if rk >= 3 else 0
-            items = []
-            for p in sorted(groups[code], key=lambda q: (q["ph_i"], q["name"])):
-                lab = "LIRU" if p["ring"] == 0 else f'{p["sector"]} {p["ring"]} NM'
-                mv = f' → verso {p["motion"][0]} {p["motion"][1]:.0f} kt' if p["motion"] else ""
-                items.append(f'{lab} entro le {p["ph_time"]}{mv}')
-            body += f'<div class="b c{cls}"><b>{code}</b></div><div class="s">{html.escape("; ".join(items))}</div>'
-    notes = ""
-    if missing:
-        notes = f'<div class="s">Dati non disponibili dal modello: {", ".join(missing)}.'
-        if "weather_code" in missing:
-            notes += " DZ non stimabile."
-        if "showers" in missing:
-            notes += " Distinzione rovescio/pioggia stimata dal CAPE."
-        notes += "</div>"
-    legend = ("Scala crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
-              "(neve: -SN, SN, +SN, SHSN). Moto = vento a 700 hPa, indicativo.")
-    return f'<div class="card">{body}{notes}<div class="s">{legend}</div></div>'
+        head = f'<div class="hd"><b class="sn">{sec}</b><span class="s">nessun fenomeno nel modello</span></div>'
+    rings = ""
+    for p in pts:
+        if p["ph"]:
+            line = f'<span class="b c{pheno_cls(p["ph"])}"><b>{p["ph"]}</b></span> entro le {p["ph_time"]}'
+            if p["motion"]:
+                line += f' · verso {p["motion"][0]} {p["motion"][1]:.0f} kt'
+            if p["eta"] is not None:
+                line += f' · su LIRU ~{p["eta"]:.0f}\' dopo le {p["ph_time"]}'
+        else:
+            line = '<span class="s">nessun fenomeno</span>'
+        rings += (f'<div class="ring"><b>{p["ring"]} NM</b> {line}<br>'
+                  f'{badge("Conv", p["conv"])}{badge("Vento", p["windlvl"])}'
+                  f'<div class="s">CAPE {fmt(p["cape"])} · raff {fmt(p["gust"])} kt · pioggia {fmt(p["precip"], 1)} mm/h</div></div>')
+    svg = sector_map(sec, by) if (has or MAP_ALWAYS) else ""
+    return f'<div class="card">{head}<div class="sc">{svg}<div class="info">{rings}</div></div></div>'
+
+
+def missing_note(missing):
+    if not missing:
+        return ""
+    n = f'<div class="s">Dati non disponibili dal modello: {", ".join(missing)}.'
+    if "weather_code" in missing:
+        n += " DZ non stimabile."
+    if "showers" in missing:
+        n += " Distinzione rovescio/pioggia stimata dal CAPE."
+    if "wind_speed_700hPa" in missing or "wind_direction_700hPa" in missing:
+        n += " Moto non disponibile."
+    return n + "</div>"
 
 
 def render(points, metars, now, missing=()):
     center = points[0]
     by = {(p["sector"], p["ring"]): p for p in points[1:]}
-    rows = "".join(
-        f'<tr><td class="sec">{sec}</td>{cell(by[(sec, 25)])}{cell(by[(sec, 50)])}</tr>' for sec in SECTORS
-    )
     ranked = sorted((p for p in points[1:] if p["conv"] is not None),
                     key=lambda p: (p["conv"], p["cape"] or 0), reverse=True)
     top = ""
     if ranked and ranked[0]["conv"] >= 1:
         t = ranked[0]
-        top = (f'Settore piu\' favorevole alla convezione: <b>{t["name"]} NM</b> '
+        top = (f'Ambiente più favorevole alla convezione: <b>{t["name"]} NM</b> '
                f'({LABELS[t["conv"]]}, CAPE {fmt(t["cape"])} J/kg).')
     elif ranked:
         top = "Nessun settore con ambiente convettivo significativo nelle prossime ore."
+    liru_ph = f'<b>{center["ph"]}</b> entro le {center["ph_time"]}' if center["ph"] else "nessun fenomeno"
+    order = sorted(SECTORS, key=lambda sc: (-max(RANK.get(by[(sc, r)]["ph"], 0) for r in RINGS_NM), list(SECTORS).index(sc)))
+    cards = "".join(sector_card(sc, by) for sc in order)
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
+    legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
+              "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
+              "«Su LIRU» = estrapolazione in linea retta, solo indicativa. "
+              "Le mappe dei settori senza fenomeni sono omesse.")
     return f"""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.1</div>
-<div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilita'.
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.2</div>
+<div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
-<span class="s">LIRU: CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
-zero termico ~{fmt(center["frz"])} m</span></div>
-<h2>Fenomeni significativi (dal più severo)</h2>
-{pheno_section(points, missing)}
-<h2>Settori (anello 25 NM | 50 NM)</h2>
-<div class="card"><table><tr><th></th><th>25 NM</th><th>50 NM</th></tr>{rows}</table></div>
-<div class="mut">Il modello descrive l'ambiente (griglia di alcuni km), non vede le singole celle.</div>
+<b>LIRU:</b> {liru_ph} · <span class="s">CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
+zero termico ~{fmt(center["frz"])} m</span>{missing_note(missing)}</div>
+<h2>Settori, dal più severo</h2>
+{cards}
+<div class="mut">{legend}</div>
 <h2>METAR</h2><div class="card">{metar_html}</div>
 </body></html>"""
 
@@ -357,13 +486,17 @@ def main():
     DATA.mkdir(exist_ok=True)
     (DOCS / "index.html").write_text(render(points, metars, now, missing), encoding="utf-8")
 
-    keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl", "ph", "ph_i")
+    keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl", "ph", "ph_i", "mdeg", "mkt", "eta")
     row = {"ts": now.isoformat(timespec="seconds"), "model": MODEL, "missing": missing,
            "points": [{k: p[k] for k in keep} for p in points],
            "metar": dict(metars)}
     with open(DATA / "history.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
     print("OK", now.isoformat(timespec="seconds"), "regime:", regime(points))
+
+
+# Costa e Lago di Bracciano (Natural Earth, semplificati): [lon, lat]
+GEO = {"coast":[[[13.849,43.092],[13.865,43.007],[13.945,42.798],[14.001,42.698],[14.063,42.625],[14.075,42.599]],[[14.096,40.834],[14.083,40.831],[14.076,40.822],[14.077,40.81]],[[14.052,40.838],[14.044,40.874],[14.021,40.922],[13.965,40.996],[13.918,41.024],[13.911,41.065],[13.852,41.147],[13.79,41.206],[13.722,41.252],[13.709,41.256],[13.663,41.251],[13.657,41.26],[13.594,41.253],[13.564,41.238],[13.575,41.208],[13.544,41.207],[13.534,41.208],[13.514,41.23],[13.5,41.222],[13.48,41.239],[13.324,41.295],[13.286,41.296],[13.187,41.278],[13.151,41.26],[13.115,41.251],[13.091,41.227],[13.068,41.222],[13.045,41.228],[13.024,41.274],[12.98,41.331],[12.894,41.399],[12.842,41.418],[12.749,41.424],[12.654,41.466],[12.635,41.447],[12.546,41.544],[12.448,41.631],[12.327,41.711],[12.239,41.736],[12.223,41.751],[12.215,41.768],[12.206,41.827],[12.147,41.903],[12.039,41.965],[12.02,41.993],[11.982,42.0],[11.935,42.031],[11.917,42.038],[11.827,42.034],[11.809,42.066],[11.75,42.128],[11.736,42.169],[11.658,42.279],[11.539,42.349],[11.489,42.359],[11.396,42.393],[11.396,42.4],[11.377,42.407],[11.355,42.407],[11.362,42.4],[11.333,42.401],[11.259,42.421],[11.211,42.419],[11.184,42.366],[11.156,42.366],[11.135,42.384],[11.107,42.391],[11.094,42.403],[11.087,42.429],[11.099,42.443],[11.113,42.446],[11.164,42.44],[11.18,42.456],[11.188,42.48],[11.187,42.521],[11.158,42.564],[11.129,42.558],[11.097,42.607],[11.081,42.613],[11.078,42.632],[11.006,42.668],[10.99,42.71],[10.944,42.743]],[[10.909,42.325],[10.923,42.319],[10.94,42.331],[10.913,42.375]],[[13.432,40.801],[13.424,40.8]]],"lakes":[[[11.977,42.64],[12.0,42.62],[12.0,42.613],[11.993,42.6],[11.995,42.561],[11.985,42.544],[11.964,42.536],[11.941,42.537],[11.92,42.546],[11.87,42.579],[11.859,42.593],[11.862,42.613],[11.875,42.632],[11.894,42.643],[11.945,42.653],[11.977,42.64]]]}
 
 
 if __name__ == "__main__":
