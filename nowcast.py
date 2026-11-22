@@ -31,6 +31,13 @@ HOURLY = [
     "cape", "convective_inhibition", "lifted_index", "freezing_level_height",
     "wind_speed_10m", "wind_gusts_10m", "precipitation",
 ]
+# Variabili opzionali: se una non e' disponibile la pagina funziona lo stesso
+EXTRA = ["showers", "weather_code", "temperature_2m", "wind_speed_700hPa", "wind_direction_700hPa"]
+TS_CAPE_MIN = 500      # J/kg: sotto questo valore non si segnala temporale
+HAIL_CAPE_MIN = 1500   # J/kg: sopra, con pioggia forte, si segnala grandine possibile
+# Scala di severita' crescente (numero = posizione). Ordine scelto da te, neve scelta da me.
+RANK = {"-RA": 1, "-DZ": 2, "RA": 3, "-SN": 3, "DZ": 4, "+RA": 5, "SN": 5, "+SN": 6,
+        "-SHRA": 6, "SHRA": 7, "SHSN": 7, "+SHRA": 8, "-TSRA": 9, "TSRA": 10, "+TSRA": 11, "TSGR": 12}
 METAR_STATIONS = "LIRU,LIRF,LIRA,LIRE"
 NM_KM = 1.852
 LABELS = ["Basso", "Moderato", "Alto", "Molto alto"]
@@ -62,11 +69,11 @@ def build_points():
 
 
 # ---------------------------------------------------------------- dati
-def fetch_model(points):
+def fetch_model(points, hourly):
     params = {
         "latitude": ",".join(str(p["lat"]) for p in points),
         "longitude": ",".join(str(p["lon"]) for p in points),
-        "hourly": ",".join(HOURLY),
+        "hourly": ",".join(hourly),
         "models": MODEL,
         "wind_speed_unit": "kn",
         "timezone": "UTC",
@@ -77,6 +84,34 @@ def fetch_model(points):
         raise RuntimeError(f"Open-Meteo errore {r.status_code}: {r.text[:300]}")
     data = r.json()
     return data if isinstance(data, list) else [data]
+
+
+def _merge(series, extra):
+    for base, ex in zip(series, extra):
+        for k, v in ex.get("hourly", {}).items():
+            if k != "time":
+                base["hourly"][k] = v
+
+
+def fetch_all(points):
+    series = fetch_model(points, HOURLY)          # obbligatorio
+    try:
+        _merge(series, fetch_model(points, EXTRA))
+    except RuntimeError:                          # una variabile non accettata: capisco quale (1 solo punto)
+        ok = []
+        for v in EXTRA:
+            try:
+                fetch_model(points[:1], [v])
+                ok.append(v)
+            except RuntimeError:
+                pass
+        if ok:
+            _merge(series, fetch_model(points, ok))
+    return series
+
+
+def missing_vars(series):
+    return [v for v in EXTRA if not any(_vals(s.get("hourly", {}).get(v)) for s in series)]
 
 
 def fetch_metar():
@@ -127,6 +162,46 @@ def wind_level(gust_kt):
     return 0 if gust_kt < 20 else 1 if gust_kt < 30 else 2 if gust_kt < 40 else 3
 
 
+def compass(deg):
+    return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int((deg + 22.5) // 45) % 8]
+
+
+def _at(h, key, i):
+    arr = h.get(key) or []
+    return arr[i] if i < len(arr) else None
+
+
+def _inten(x):
+    return "-" if x < 2.5 else "" if x < 7.5 else "+"
+
+
+def phenomenon(h, i):
+    """Codice stile METAR dedotto dal modello per l'ora i. None = nessun fenomeno."""
+    P, S = _at(h, "precipitation", i), _at(h, "showers", i)
+    wc, cape, t2 = _at(h, "weather_code", i), _at(h, "cape", i), _at(h, "temperature_2m", i)
+    wc = int(wc) if wc is not None else None
+    if P is None and wc is None:
+        return None
+    P = P or 0.0
+    ts_wc = wc in (95, 96, 99)
+    shower = ts_wc or wc in (80, 81, 82, 85, 86) or (S is not None and P > 0 and S / P >= 0.5)
+    if not shower and S is None and cape is not None and cape >= TS_CAPE_MIN and P >= 0.3:
+        shower = True                              # senza dati sulla pioggia convettiva: stima dal CAPE
+    if t2 is not None and t2 <= 1.0 and P >= 0.1 and not ts_wc:
+        return "SHSN" if shower else ("-SN" if P < 1 else "SN" if P < 3 else "+SN")
+    if ts_wc or (shower and cape is not None and cape >= TS_CAPE_MIN and P >= 0.3):
+        if wc in (96, 99) or ((cape or 0) >= HAIL_CAPE_MIN and P >= 5):
+            return "TSGR"
+        return _inten(P) + "TSRA"
+    if shower and P >= 0.1:
+        return _inten(P) + "SHRA"
+    if wc in (51, 53, 55, 56, 57):
+        return "-DZ" if wc == 51 else "DZ"
+    if P >= 0.1:
+        return _inten(P) + "RA"
+    return None
+
+
 def analyse(points, series):
     for p, s in zip(points, series):
         h = s.get("hourly", {})
@@ -141,6 +216,17 @@ def analyse(points, series):
         p["frz"] = fz[0] if fz else None
         p["conv"] = conv_level(p["cape"], p["cin"], p["li"])
         p["windlvl"] = wind_level(p["gust"])
+        codes = [phenomenon(h, i) for i in range(HORIZON_H)]
+        ranked = [(RANK[c], c) for c in codes if c]
+        p["ph"], p["ph_i"], p["ph_time"], p["motion"] = None, None, None, None
+        if ranked:
+            p["ph"] = max(ranked)[1]
+            p["ph_i"] = codes.index(p["ph"])
+            t = _at(h, "time", p["ph_i"])
+            p["ph_time"] = (t[11:13] + "Z") if t else "?"
+            d, v = _at(h, "wind_direction_700hPa", p["ph_i"]), _at(h, "wind_speed_700hPa", p["ph_i"])
+            if d is not None and v is not None:
+                p["motion"] = (compass((d + 180) % 360), v)   # verso dove va, stimato dal vento a 700 hPa
     return points
 
 
@@ -190,7 +276,38 @@ def cell(p):
             f'<div class="s">CAPE {fmt(p["cape"])} · raff {fmt(p["gust"])} kt · pioggia {fmt(p["precip"], 1)}</div></td>')
 
 
-def render(points, metars, now):
+def pheno_section(points, missing):
+    groups = {}
+    for p in points:
+        if p.get("ph"):
+            groups.setdefault(p["ph"], []).append(p)
+    if not groups:
+        body = '<div class="b c0">Nessun fenomeno significativo nel modello nelle prossime ore.</div>'
+    else:
+        body = ""
+        for code in sorted(groups, key=lambda c: RANK[c], reverse=True):
+            rk = RANK[code]
+            cls = 3 if rk >= 9 else 2 if rk >= 6 else 1 if rk >= 3 else 0
+            items = []
+            for p in sorted(groups[code], key=lambda q: (q["ph_i"], q["name"])):
+                lab = "LIRU" if p["ring"] == 0 else f'{p["sector"]} {p["ring"]} NM'
+                mv = f' → verso {p["motion"][0]} {p["motion"][1]:.0f} kt' if p["motion"] else ""
+                items.append(f'{lab} entro le {p["ph_time"]}{mv}')
+            body += f'<div class="b c{cls}"><b>{code}</b></div><div class="s">{html.escape("; ".join(items))}</div>'
+    notes = ""
+    if missing:
+        notes = f'<div class="s">Dati non disponibili dal modello: {", ".join(missing)}.'
+        if "weather_code" in missing:
+            notes += " DZ non stimabile."
+        if "showers" in missing:
+            notes += " Distinzione rovescio/pioggia stimata dal CAPE."
+        notes += "</div>"
+    legend = ("Scala crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
+              "(neve: -SN, SN, +SN, SHSN). Moto = vento a 700 hPa, indicativo.")
+    return f'<div class="card">{body}{notes}<div class="s">{legend}</div></div>'
+
+
+def render(points, metars, now, missing=()):
     center = points[0]
     by = {(p["sector"], p["ring"]): p for p in points[1:]}
     rows = "".join(
@@ -216,6 +333,8 @@ Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
 <span class="s">LIRU: CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
 zero termico ~{fmt(center["frz"])} m</span></div>
+<h2>Fenomeni significativi (dal più severo)</h2>
+{pheno_section(points, missing)}
 <h2>Settori (anello 25 NM | 50 NM)</h2>
 <div class="card"><table><tr><th></th><th>25 NM</th><th>50 NM</th></tr>{rows}</table></div>
 <div class="mut">Il modello descrive l'ambiente (griglia di alcuni km), non vede le singole celle.</div>
@@ -227,18 +346,19 @@ zero termico ~{fmt(center["frz"])} m</span></div>
 def main():
     now = dt.datetime.now(dt.timezone.utc)
     points = build_points()
-    series = fetch_model(points)
+    series = fetch_all(points)
     if len(series) != len(points):
         raise RuntimeError(f"Attesi {len(points)} punti, ricevuti {len(series)}")
     analyse(points, series)
+    missing = missing_vars(series)
     metars = fetch_metar()
 
     DOCS.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
-    (DOCS / "index.html").write_text(render(points, metars, now), encoding="utf-8")
+    (DOCS / "index.html").write_text(render(points, metars, now, missing), encoding="utf-8")
 
-    keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl")
-    row = {"ts": now.isoformat(timespec="seconds"), "model": MODEL,
+    keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl", "ph", "ph_i")
+    row = {"ts": now.isoformat(timespec="seconds"), "model": MODEL, "missing": missing,
            "points": [{k: p[k] for k in keep} for p in points],
            "metar": dict(metars)}
     with open(DATA / "history.jsonl", "a", encoding="utf-8") as f:
