@@ -1,0 +1,30 @@
+name: aggiorna-cruscotto
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aggiorna
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python nowcast.py
+      - name: Salva risultati
+        run: |
+          git config user.name "cruscotto-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs data
+          git diff --cached --quiet || (git commit -m "aggiornamento $(date -u +%H:%MZ)" && git pull --rebase && git push)
