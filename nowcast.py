@@ -32,7 +32,8 @@ HOURLY = [
     "wind_speed_10m", "wind_gusts_10m", "precipitation",
 ]
 # Variabili opzionali: se una non e' disponibile la pagina funziona lo stesso
-EXTRA = ["showers", "weather_code", "temperature_2m", "wind_speed_700hPa", "wind_direction_700hPa"]
+EXTRA = ["showers", "weather_code", "temperature_2m", "wind_speed_700hPa", "wind_direction_700hPa",
+         "wind_direction_10m", "dew_point_2m", "cloud_cover_low"]
 TS_CAPE_MIN = 500      # J/kg: sotto questo valore non si segnala temporale
 HAIL_CAPE_MIN = 1500   # J/kg: sopra, con pioggia forte, si segnala grandine possibile
 # Scala di severita' crescente (numero = posizione). Ordine scelto da te, neve scelta da me.
@@ -285,6 +286,13 @@ def analyse(points, series):
         p["conv"] = conv_level(p["cape"], p["cin"], p["li"])
         p["windlvl"] = wind_level(p["gust"])
         codes = [phenomenon(h, i) for i in range(HORIZON_H)]
+        p["hrs"] = []                                   # dettaglio ora per ora (immagine prevista e TAF)
+        for i in range(HORIZON_H):
+            d, v = _at(h, "wind_direction_700hPa", i), _at(h, "wind_speed_700hPa", i)
+            p["hrs"].append({"t": _at(h, "time", i), "ph": codes[i], "m": (d + 180) % 360 if d is not None else None, "k": v,
+                             "wd": _at(h, "wind_direction_10m", i), "ws": _at(h, "wind_speed_10m", i),
+                             "wg": _at(h, "wind_gusts_10m", i), "T": _at(h, "temperature_2m", i),
+                             "Td": _at(h, "dew_point_2m", i), "cl": _at(h, "cloud_cover_low", i)})
         ranked = [(RANK[c], c) for c in codes if c]
         p["ph"], p["ph_i"], p["ph_time"], p["motion"] = None, None, None, None
         p["mdeg"], p["mkt"], p["eta"], p["ph_ts"] = None, None, None, None
@@ -342,6 +350,8 @@ pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .compass #map{height:auto;aspect-ratio:1;min-height:190px}
 .cb{border-radius:8px;padding:4px 5px;font-size:11px;line-height:1.3;min-height:70px;overflow:hidden}
 .cb b{font-size:13px}.cb .cd{font-weight:700;font-size:12px}
+.cb{cursor:pointer}.taf{background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:6px;font-size:12px;white-space:pre-wrap}
+.hb{font-size:13px;padding:3px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg)}.hb.on{background:var(--c1);font-weight:700}
 .chip{display:inline-block;width:14px;height:14px;border-radius:50%;font-size:9px;text-align:center;line-height:14px;margin:2px 2px 0 0;color:#000}
 .k0{background:var(--m0)}.k1{background:var(--m1)}.k2{background:var(--m2)}.k3{background:var(--m3)}.kn{background:var(--mn)}
 summary{cursor:pointer;font-weight:600;margin:12px 0 6px}.ctl{display:flex;gap:8px;align-items:center;margin-top:6px}
@@ -430,28 +440,32 @@ def sector_map(sec, by):
     ox, oy = tp(0, 0)
     e.append(f'<circle class="liru" cx="{ox:.0f}" cy="{oy:.0f}" r="4"/>'
              f'<text class="t tb" x="{ox + 6:.0f}" y="{oy - 5:.0f}">LIRU</text>')
-    for r in RINGS_NM:
-        p = by[(sec, r)]
-        x, y = to_nm(p["lat"], p["lon"])
-        u, v = tp(x, y)
-        cls = pheno_cls(p["ph"])
-        e.append(f'<circle class="pt m{"n" if cls is None else cls}" cx="{u:.1f}" cy="{v:.1f}" r="6"/>')
-        if p["ph"]:
-            e.append(f'<text class="t tb" text-anchor="middle" x="{u:.0f}" y="{v - 10:.0f}">{p["ph"]}</text>')
-        if p["ph"] and p["mdeg"] is not None:
-            m = math.radians(p["mdeg"])
-            length = min(p["mkt"] / 2.0, 26.0)          # NM percorse in 30 minuti
-            eu, ev = tp(x + length * math.sin(m), y + length * math.cos(m))
-            while length > 6 and not (8 < eu < 192 and 8 < ev < 192):   # freccia dentro la mappa
-                length *= 0.9
+    for i in range(HORIZON_H):
+        e.append(f'<g class="fr" data-h="{i}"' + ("" if i == 0 else ' style="display:none"') + ">")
+        for r in RINGS_NM:
+            p = by[(sec, r)]
+            hh = p["hrs"][i] if len(p["hrs"]) > i else {"ph": None, "m": None, "k": None}
+            x, y = to_nm(p["lat"], p["lon"])
+            u, v = tp(x, y)
+            code, cls = hh["ph"], pheno_cls(hh["ph"])
+            e.append(f'<circle class="pt m{"n" if cls is None else cls}" cx="{u:.1f}" cy="{v:.1f}" r="6"/>')
+            if code:
+                e.append(f'<text class="t tb" text-anchor="middle" x="{u:.0f}" y="{v - 10:.0f}">{code}</text>')
+            if code and hh["m"] is not None and hh["k"]:
+                m = math.radians(hh["m"])
+                length = min(hh["k"] / 2.0, 26.0)
                 eu, ev = tp(x + length * math.sin(m), y + length * math.cos(m))
-            dx, dy = eu - u, ev - v
-            n = math.hypot(dx, dy) or 1.0
-            dx, dy = dx / n, dy / n
-            bx, by_ = eu - 8 * dx, ev - 8 * dy
-            e.append(f'<line class="arw" x1="{u:.1f}" y1="{v:.1f}" x2="{bx:.1f}" y2="{by_:.1f}"/>'
-                     f'<polygon class="ah" points="{eu:.1f},{ev:.1f} {bx - 4 * dy:.1f},{by_ + 4 * dx:.1f} '
-                     f'{bx + 4 * dy:.1f},{by_ - 4 * dx:.1f}"/>')
+                while length > 6 and not (8 < eu < 192 and 8 < ev < 192):
+                    length *= 0.9
+                    eu, ev = tp(x + length * math.sin(m), y + length * math.cos(m))
+                dx, dy = eu - u, ev - v
+                n = math.hypot(dx, dy) or 1.0
+                dx, dy = dx / n, dy / n
+                bx, by_ = eu - 8 * dx, ev - 8 * dy
+                e.append(f'<line class="arw" x1="{u:.1f}" y1="{v:.1f}" x2="{bx:.1f}" y2="{by_:.1f}"/>'
+                         f'<polygon class="ah" points="{eu:.1f},{ev:.1f} {bx - 4 * dy:.1f},{by_ + 4 * dx:.1f} '
+                         f'{bx + 4 * dy:.1f},{by_ - 4 * dx:.1f}"/>')
+        e.append("</g>")
     e.append('</g><text class="t tb" x="6" y="13">N↑</text>')
     return f'<svg viewBox="0 0 200 200" role="img" aria-label="Mappa settore {sec}">{"".join(e)}</svg>'
 
@@ -470,13 +484,54 @@ def arrival_text(p, now):
     return f"~{arr:%H:%M}Z ±30'"
 
 
+VIS = {"-RA": 8000, "-DZ": 6000, "RA": 6000, "DZ": 4000, "+RA": 3000, "-SHRA": 7000, "SHRA": 5000, "+SHRA": 3000,
+       "-TSRA": 5000, "TSRA": 3000, "+TSRA": 1500, "TSGR": 1500, "-SN": 4000, "SN": 2000, "+SN": 800, "SHSN": 2000}
+
+
+def _cloud(h, code):
+    cl = h["cl"]
+    if cl is None and not code:
+        return ""
+    cl = cl or 0
+    amt = "FEW" if cl < 37 else "SCT" if cl < 62 else "BKN" if cl < 87 else "OVC"
+    if code and amt in ("FEW", "SCT"):
+        amt = "BKN"
+    if cl < 12 and not code:
+        return "NSC"
+    base = 25 if h["T"] is None or h["Td"] is None else int(min(max(round((h["T"] - h["Td"]) * 4), 6), 120))
+    return f"{amt}{base:03d}" + ("CB" if code and "TS" in code else "")
+
+
+def taf_text(sec, by, now):
+    """TAF FITTIZIO costruito dai dati del modello (vento al punto a 25 NM, fenomeno peggiore tra 25 e 50 NM)."""
+    near, far = by[(sec, RINGS_NM[0])], by[(sec, RINGS_NM[1])]
+    hrs = near["hrs"]
+    if not hrs or not hrs[0]["t"]:
+        return "Dati insufficienti per il TAF."
+    T = lambda h: dt.datetime.strptime(h["t"], "%Y-%m-%dT%H:%M")
+    groups = []
+    for i, h in enumerate(hrs):
+        cands = [q["hrs"][i]["ph"] for q in (near, far) if len(q["hrs"]) > i and q["hrs"][i]["ph"]]
+        code = max(cands, key=lambda c: RANK[c]) if cands else None
+        ws, wg, wd = h["ws"], h["wg"], h["wd"]
+        w = "VRB" if wd is None else f"{(int(round(wd / 10.0)) * 10) % 360 or 360:03d}"
+        w += "//" if ws is None else f"{int(round(ws)):02d}"
+        if ws is not None and wg is not None and wg - ws >= 10:
+            w += f"G{int(round(wg)):02d}"
+        groups.append(" ".join(x for x in (w + "KT", f"{VIS.get(code, 9999):04d}", code or "", _cloud(h, code)) if x))
+    t0, t1 = T(hrs[0]) - dt.timedelta(hours=1), T(hrs[-1])
+    lines = [f"TAF LIRU-{sec} {now:%d%H%M}Z {t0:%d%H}/{t1:%d%H} {groups[0]}"]
+    for i in range(1, len(groups)):
+        if groups[i] != groups[i - 1]:
+            lines.append(f"FM{(T(hrs[i]) - dt.timedelta(hours=1)):%d%H}00 {groups[i]}")
+    return "\n".join(lines)
+
+
 def sector_card(sec, by, now):
     pts = [by[(sec, r)] for r in RINGS_NM]
     worst = max(pts, key=lambda p: RANK.get(p["ph"], 0))
-    has = worst["ph"] is not None
-    if has:
-        head = (f'<div class="hd"><b class="sn">{sec}</b>'
-                f'<span class="b c{pheno_cls(worst["ph"])}"><b>{worst["ph"]}</b></span>'
+    if worst["ph"]:
+        head = (f'<div class="hd"><b class="sn">{sec}</b><span class="b c{pheno_cls(worst["ph"])}"><b>{worst["ph"]}</b></span>'
                 f'<span class="s">{worst["ring"]} NM, entro le {worst["ph_time"]}</span></div>')
     else:
         head = f'<div class="hd"><b class="sn">{sec}</b><span class="s">nessun fenomeno nel modello</span></div>'
@@ -493,8 +548,13 @@ def sector_card(sec, by, now):
         rings += (f'<div class="ring"><b>{p["ring"]} NM</b> {line}<br>'
                   f'{badge("Conv", p["conv"])}{badge("Vento", p["windlvl"])}'
                   f'<div class="s">CAPE {fmt(p["cape"])} · raff {fmt(p["gust"])} kt · pioggia {fmt(p["precip"], 1)} mm/h</div></div>')
-    svg = sector_map(sec, by) if (has or MAP_ALWAYS) else ""
-    return f'<div class="card">{head}<div class="sc">{svg}<div class="info">{rings}</div></div></div>'
+    hours = by[(sec, RINGS_NM[0])]["hrs"]
+    btns = "".join(f'<button class="hb{" on" if i == 0 else ""}" data-h="{i}">{(h["t"] or "?")[11:13]}Z</button>'
+                   for i, h in enumerate(hours))
+    return (f'<div class="card sp" id="sp-{sec}" hidden>{head}<pre class="taf">{html.escape(taf_text(sec, by, now))}</pre>'
+            f'<div class="s">TAF FITTIZIO generato dal modello: non è un TAF ufficiale, non usarlo per la navigazione. '
+            f'Immagine: situazione prevista nell\'ora che termina all\'orario scelto.</div>'
+            f'<div class="ctl">{btns}</div><div class="sc">{sector_map(sec, by)}<div class="info">{rings}</div></div></div>')
 
 
 MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -514,6 +574,7 @@ var col=["#4caf50","#e6c200","#f08a24","#d32f2f"];
 [25,50].forEach(function(r){L.circle(C,{radius:r*1852,color:"#666",weight:1,fill:false,dashArray:"4 4"}).addTo(map)});
 D.l.forEach(function(l){L.polyline(l,{color:"#666",weight:1,opacity:.5}).addTo(map)});
 L.circleMarker(C,{radius:5,color:"#000",fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip("LIRU",{permanent:true,direction:"right"});
+D.a.forEach(function(a){L.circleMarker([a[1],a[2]],{radius:3,color:"#333",weight:1,fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip(a[0],{permanent:true,direction:"bottom",offset:[0,4]})});
 D.p.forEach(function(p){L.circleMarker([p.lat,p.lon],{radius:7,color:"#000",weight:1,fillColor:col[p.c],fillOpacity:.95}).addTo(map)
 .bindTooltip(p.ph+" "+p.t,{permanent:true,direction:"top",offset:[0,-6]});
 if(p.m!=null){var d=Math.min(p.k/2,26)*1852,a=p.m*Math.PI/180,la=p.lat+d*Math.cos(a)/111320,lo=p.lon+d*Math.sin(a)/(111320*Math.cos(p.lat*Math.PI/180));
@@ -540,7 +601,7 @@ def map_data(points, sat):
     pts = [{"lat": p["lat"], "lon": p["lon"], "ph": p["ph"], "c": pheno_cls(p["ph"]), "t": p["ph_time"],
             "m": p["mdeg"], "k": p["mkt"]} for p in points if p["ph"]]
     lines = [[list(CENTER), list(destination(CENTER[0], CENTER[1], b + 22.5, 50))] for b in SECTORS.values()]
-    return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}}
+    return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}, "a": [[k, v[0], v[1]] for k, v in AIRPORTS.items()]}
 
 
 def compass_box(sec, by, now):
@@ -550,19 +611,27 @@ def compass_box(sec, by, now):
     chip = lambda lab, v: f'<span class="chip k{"n" if v is None else v}">{lab}</span>'
     chips = chip("C", lv("conv")) + chip("V", lv("windlvl"))
     if not w["ph"]:
-        return f'<div class="cb cn"><b>{sec}</b><br><span class="s">nessun fenomeno</span><br>{chips}</div>'
+        return f'<div class="cb cn" data-s="{sec}"><b>{sec}</b><br><span class="s">nessun fenomeno</span><br>{chips}</div>'
     t = f'<b>{sec}</b><br><span class="cd">{w["ph"]}</span><br>{w["ph_time"]} · {w["ring"]} NM'
     if w["motion"]:
         t += f'<br>→ {w["motion"][0]} {w["motion"][1]:.0f} kt'
     if w["eta"] is not None:
         t += f'<br>LIRU {arrival_text(w, now).split(" ")[0]}'
-    return f'<div class="cb c{pheno_cls(w["ph"])}">{t}<br>{chips}</div>'
+    return f'<div class="cb c{pheno_cls(w["ph"])}" data-s="{sec}">{t}<br>{chips}</div>'
 
 
 def compass_html(by, now):
     box = lambda sc: compass_box(sc, by, now)
     return ('<div class="compass">' + box("NW") + box("N") + box("NE") + box("W") + '<div id="map"></div>'
             + box("E") + box("SW") + box("S") + box("SE") + "</div>")
+
+
+PANEL_JS = """<script>(function(){var P=document.querySelectorAll(".sp");
+document.querySelectorAll(".cb").forEach(function(b){b.onclick=function(){var id="sp-"+b.dataset.s;
+P.forEach(function(p){p.hidden=p.id!=id});document.getElementById(id).scrollIntoView({behavior:"smooth",block:"start"})}});
+document.querySelectorAll(".hb").forEach(function(b){b.onclick=function(){var s=b.closest(".sp");
+s.querySelectorAll(".hb").forEach(function(x){x.classList.toggle("on",x==b)});
+s.querySelectorAll(".fr").forEach(function(g){g.style.display=g.dataset.h==b.dataset.h?"":"none"})}})})();</script>"""
 
 
 def missing_note(missing):
@@ -609,7 +678,7 @@ def render(points, metars, now, missing=(), sat=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.6</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.7</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
@@ -617,10 +686,11 @@ Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
 <b>LIRU:</b> {liru_ph} · <span class="s">CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
 zero termico ~{fmt(center["frz"])} m</span>{missing_note(missing)}</div>
-<details><summary>Dettaglio per settore (25/50 NM, CAPE, raffiche, mappe)</summary>{cards}</details>
+<div class="mut">Tocca un settore per il TAF fittizio e l'immagine prevista dell'area.</div>
+{cards}
 <div class="mut">{legend}</div>
 <h2>METAR</h2><div class="card">{metar_html}</div>
-</body></html>"""
+{PANEL_JS}</body></html>"""
 
 
 # ---------------------------------------------------------------- main
