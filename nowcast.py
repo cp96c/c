@@ -127,6 +127,41 @@ def missing_vars(series):
     return [v for v in EXTRA if not any(_vals(s.get("hourly", {}).get(v)) for s in series)]
 
 
+WMS = "https://view.eumetsat.int/geoserver/wms"
+SAT_LAYERS = {"geocolour": "mtg_fd:rgb_geocolour", "ir": "mtg_fd:ir105_hrfi"}
+
+
+def _last_times(text, n=7):
+    parse = lambda x: dt.datetime.strptime(x.strip().replace("Z", "")[:19], "%Y-%m-%dT%H:%M:%S")
+    fmt_ = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    last = text.split(",")[-1].strip()
+    if "/" in last:                                   # inizio/fine/periodo, es. .../PT10M
+        _, end, step = last.split("/")
+        mins = int(step[2:-1]) if step.startswith("PT") and step.endswith("M") else 10
+        return [fmt_(parse(end) - dt.timedelta(minutes=mins * i)) for i in reversed(range(n))]
+    return [fmt_(parse(x)) for x in text.split(",")][-n:]
+
+
+def sat_times():
+    out = {k: [] for k in SAT_LAYERS}
+    try:
+        import xml.etree.ElementTree as ET
+        r = requests.get(WMS, params={"service": "WMS", "request": "GetCapabilities", "version": "1.3.0"}, timeout=60)
+        r.raise_for_status()
+        for el in ET.fromstring(r.content).iter():
+            if el.tag.split("}")[-1] != "Layer":
+                continue
+            kids = {c.tag.split("}")[-1]: c for c in el if c.tag.split("}")[-1] in ("Name", "Dimension")}
+            name = kids["Name"].text if "Name" in kids else None
+            for key, lay in SAT_LAYERS.items():
+                d = kids.get("Dimension")
+                if name == lay and d is not None and d.text and d.get("name", "").lower() == "time":
+                    out[key] = _last_times(d.text)
+    except Exception as e:  # noqa: BLE001
+        print("satellite: GetCapabilities non riuscito:", e)
+    return out
+
+
 def fetch_metar():
     try:
         r = requests.get("https://aviationweather.gov/api/data/metar",
@@ -302,6 +337,8 @@ th{font-size:13px;text-align:left;padding:4px}td{padding:3px;vertical-align:top}
 .s{font-size:12px;color:var(--mut)}
 pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .warn{border-left:4px solid #c0392b}
+#map{height:min(68vh,440px);border-radius:8px}.ctl{display:flex;gap:8px;align-items:center;margin-top:6px}
+.ctl input[type=range]{flex:1}.ctl button{font-size:18px;padding:2px 10px}.ctl select{font-size:14px}
 .stale{color:#c0392b;font-weight:700;font-size:14px}
 .hd{display:flex;gap:8px;align-items:center;margin-bottom:6px}.sn{font-size:18px}
 .sc{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
@@ -453,6 +490,52 @@ def sector_card(sec, by, now):
     return f'<div class="card">{head}<div class="sc">{svg}<div class="info">{rings}</div></div></div>'
 
 
+MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<div class="card"><div id="map"></div>
+<div class="ctl"><button id="pl">⏸</button><input type="range" id="sl" min="0" max="0" value="0"><b id="tl">…</b></div>
+<div class="ctl"><label><input type="checkbox" id="cr" checked> Radar</label>
+<select id="cs"><option value="geocolour">Nuvole · colori</option><option value="ir">Nuvole · infrarosso</option><option value="">Nuvole · no</option></select></div>
+<div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultime ore, nessuna previsione).
+Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Mappa © OpenStreetMap, © CARTO.
+Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto.</div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>(function(){var D=__DATA__,C=D.c,$=function(i){return document.getElementById(i)};
+var map=L.map("map").setView(C,8),dark=matchMedia("(prefers-color-scheme:dark)").matches;
+L.tileLayer("https://{s}.basemaps.cartocdn.com/"+(dark?"dark_all":"light_all")+"/{z}/{x}/{y}{r}.png",{maxZoom:12}).addTo(map);
+map.createPane("sat").style.zIndex=250;map.createPane("rad").style.zIndex=260;
+var col=["#4caf50","#e6c200","#f08a24","#d32f2f"];
+[25,50].forEach(function(r){L.circle(C,{radius:r*1852,color:"#666",weight:1,fill:false,dashArray:"4 4"}).addTo(map)});
+D.l.forEach(function(l){L.polyline(l,{color:"#666",weight:1,opacity:.5}).addTo(map)});
+L.circleMarker(C,{radius:5,color:"#000",fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip("LIRU",{permanent:true,direction:"right"});
+D.p.forEach(function(p){L.circleMarker([p.lat,p.lon],{radius:7,color:"#000",weight:1,fillColor:col[p.c],fillOpacity:.95}).addTo(map)
+.bindTooltip(p.ph+" "+p.t,{permanent:true,direction:"top",offset:[0,-6]});
+if(p.m!=null){var d=Math.min(p.k/2,26)*1852,a=p.m*Math.PI/180,la=p.lat+d*Math.cos(a)/111320,lo=p.lon+d*Math.sin(a)/(111320*Math.cos(p.lat*Math.PI/180));
+L.polyline([[p.lat,p.lon],[la,lo]],{color:"#000",weight:2}).addTo(map);
+L.marker([la,lo],{icon:L.divIcon({className:"",iconSize:[16,16],iconAnchor:[8,8],html:'<div style="transform:rotate('+p.m+'deg);font-size:16px;line-height:16px;text-align:center">▲</div>'})}).addTo(map)}});
+var LAY={geocolour:"mtg_fd:rgb_geocolour",ir:"mtg_fd:ir105_hrfi"},fr=[],rad=[],sat=[],sk="geocolour",ix=0,tm=null,run=true;
+function mkSat(){sat.forEach(function(l){map.removeLayer(l)});sat=[];var k=$("cs").value;if(!k)return;
+(D.s[k]||[]).forEach(function(t){sat.push(L.tileLayer.wms("https://view.eumetsat.int/geoserver/wms",{layers:LAY[k],format:"image/png",version:"1.3.0",time:t,pane:"sat",opacity:0}).addTo(map))});show(ix)}
+function show(i){ix=i;if(!fr.length)return;var T=fr[i];$("sl").value=i;$("tl").textContent=new Date(T*1000).toISOString().substr(11,5)+"Z";
+rad.forEach(function(l,k){l.setOpacity(k==i&&$("cr").checked?.7:0)});
+var k=$("cs").value,ts=D.s[k]||[],b=-1;ts.forEach(function(t,j){if(Date.parse(t)/1000<=T+300)b=j});if(b<0)b=0;
+sat.forEach(function(l,j){l.setOpacity(j==b?.8:0)})}
+function step(){if(!run)return;show((ix+1)%fr.length);tm=setTimeout(step,ix==fr.length-1?1800:600)}
+function go(){$("sl").max=Math.max(fr.length-1,0);ix=fr.length-1;mkSat();show(ix);tm=setTimeout(step,900)}
+fetch("https://api.rainviewer.com/public/weather-maps.json").then(function(r){return r.json()}).then(function(j){
+(j.radar.past||[]).slice(-7).forEach(function(f){fr.push(f.time);rad.push(L.tileLayer(j.host+f.path+"/256/{z}/{x}/{y}/2/1_1.png",{pane:"rad",opacity:0,maxNativeZoom:7,maxZoom:12}).addTo(map))});go()})
+.catch(function(){fr=(D.s.ir||D.s.geocolour||[]).map(function(t){return Date.parse(t)/1000});if(!fr.length)$("tl").textContent="radar e nuvole non disponibili";go()});
+$("pl").onclick=function(){run=!run;this.textContent=run?"⏸":"▶";clearTimeout(tm);if(run)step()};
+$("sl").oninput=function(){run=false;$("pl").textContent="▶";clearTimeout(tm);show(+this.value)};
+$("cr").onchange=function(){show(ix)};$("cs").onchange=mkSat})();</script>"""
+
+
+def map_data(points, sat):
+    pts = [{"lat": p["lat"], "lon": p["lon"], "ph": p["ph"], "c": pheno_cls(p["ph"]), "t": p["ph_time"],
+            "m": p["mdeg"], "k": p["mkt"]} for p in points if p["ph"]]
+    lines = [[list(CENTER), list(destination(CENTER[0], CENTER[1], b + 22.5, 50))] for b in SECTORS.values()]
+    return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}}
+
+
 def missing_note(missing):
     if not missing:
         return ""
@@ -466,7 +549,7 @@ def missing_note(missing):
     return n + "</div>"
 
 
-def render(points, metars, now, missing=()):
+def render(points, metars, now, missing=(), sat=None):
     center = points[0]
     by = {(p["sector"], p["ring"]): p for p in points[1:]}
     ranked = sorted((p for p in points[1:] if p["conv"] is not None),
@@ -487,6 +570,7 @@ def render(points, metars, now, missing=()):
               'GitHub ha ritardato l\'aggiornamento: non fidarti di questa pagina.";}'
               'else{e.className="mut";e.textContent="Dati generati "+m+" min fa";}}'
               'u();setInterval(u,20000);})();</script>').replace("EPOCH", str(int(now.timestamp())))
+    map_card = MAP_HTML.replace("__DATA__", json.dumps(map_data(points, sat)))
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
@@ -496,10 +580,11 @@ def render(points, metars, now, missing=()):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.4</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.5</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
+{map_card}
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
 <b>LIRU:</b> {liru_ph} · <span class="s">CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
 zero termico ~{fmt(center["frz"])} m</span>{missing_note(missing)}</div>
@@ -521,10 +606,11 @@ def main():
     analyse(points, series)
     missing = missing_vars(series)
     metars = fetch_metar()
+    sat = sat_times()
 
     DOCS.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
-    (DOCS / "index.html").write_text(render(points, metars, now, missing), encoding="utf-8")
+    (DOCS / "index.html").write_text(render(points, metars, now, missing, sat), encoding="utf-8")
 
     keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl", "ph", "ph_i", "mdeg", "mkt", "eta")
     row = {"ts": now.isoformat(timespec="seconds"), "model": MODEL, "missing": missing,
