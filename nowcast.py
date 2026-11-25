@@ -252,17 +252,21 @@ def analyse(points, series):
         codes = [phenomenon(h, i) for i in range(HORIZON_H)]
         ranked = [(RANK[c], c) for c in codes if c]
         p["ph"], p["ph_i"], p["ph_time"], p["motion"] = None, None, None, None
-        p["mdeg"], p["mkt"], p["eta"] = None, None, None
+        p["mdeg"], p["mkt"], p["eta"], p["ph_ts"] = None, None, None, None
         if ranked:
             p["ph"] = max(ranked)[1]
             p["ph_i"] = codes.index(p["ph"])
             t = _at(h, "time", p["ph_i"])
             p["ph_time"] = (t[11:13] + "Z") if t else "?"
+            p["ph_ts"] = t
             d, v = _at(h, "wind_direction_700hPa", p["ph_i"]), _at(h, "wind_speed_700hPa", p["ph_i"])
             if d is not None and v is not None:
                 p["motion"] = (compass((d + 180) % 360), v)   # verso dove va, stimato dal vento a 700 hPa
                 p["mdeg"], p["mkt"] = (d + 180) % 360, v
                 p["eta"] = eta_liru(p)
+        floor = {"-TSRA": 1, "TSRA": 1, "+TSRA": 2, "TSGR": 3}.get(p["ph"])   # Conv non sotto il fenomeno
+        if floor is not None and (p["conv"] is None or p["conv"] < floor):
+            p["conv"] = floor
     return points
 
 
@@ -408,7 +412,21 @@ def sector_map(sec, by):
     return f'<svg viewBox="0 0 200 200" role="img" aria-label="Mappa settore {sec}">{"".join(e)}</svg>'
 
 
-def sector_card(sec, by):
+def arrival_text(p, now):
+    """Ora stimata di arrivo su LIRU. Il dato orario e' la media dell'ora che finisce a ph_ts:
+    uso il centro di quell'ora (mezz'ora prima) piu' il tempo di percorrenza, con +-30'."""
+    if not p.get("ph_ts") or p["eta"] is None:
+        return ""
+    t0 = dt.datetime.strptime(p["ph_ts"], "%Y-%m-%dT%H:%M").replace(tzinfo=dt.timezone.utc)
+    arr = t0 - dt.timedelta(minutes=30) + dt.timedelta(minutes=p["eta"])
+    if arr <= now:
+        return "imminente"
+    arr = arr.replace(second=0, microsecond=0)
+    arr += dt.timedelta(minutes=(-arr.minute) % 5)          # arrotondo ai 5 minuti
+    return f"~{arr:%H:%M}Z ±30'"
+
+
+def sector_card(sec, by, now):
     pts = [by[(sec, r)] for r in RINGS_NM]
     worst = max(pts, key=lambda p: RANK.get(p["ph"], 0))
     has = worst["ph"] is not None
@@ -425,7 +443,7 @@ def sector_card(sec, by):
             if p["motion"]:
                 line += f' · verso {p["motion"][0]} {p["motion"][1]:.0f} kt'
             if p["eta"] is not None:
-                line += f' · su LIRU ~{p["eta"]:.0f}\' dopo le {p["ph_time"]}'
+                line += f' · su LIRU {arrival_text(p, now)}'
         else:
             line = '<span class="s">nessun fenomeno</span>'
         rings += (f'<div class="ring"><b>{p["ring"]} NM</b> {line}<br>'
@@ -462,7 +480,7 @@ def render(points, metars, now, missing=()):
         top = "Nessun settore con ambiente convettivo significativo nelle prossime ore."
     liru_ph = f'<b>{center["ph"]}</b> entro le {center["ph_time"]}' if center["ph"] else "nessun fenomeno"
     order = sorted(SECTORS, key=lambda sc: (-max(RANK.get(by[(sc, r)]["ph"], 0) for r in RINGS_NM), list(SECTORS).index(sc)))
-    cards = "".join(sector_card(sc, by) for sc in order)
+    cards = "".join(sector_card(sc, by, now) for sc in order)
     age_js = ('<div id="age" class="mut"></div><script>(function(){var t=EPOCH*1000;function u(){'
               'var m=Math.round((Date.now()-t)/60000),e=document.getElementById("age");'
               'if(m>30){e.className="stale";e.textContent="ATTENZIONE: dati vecchi di "+m+" min. '
@@ -472,13 +490,13 @@ def render(points, metars, now, missing=()):
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
-              "«Su LIRU» = estrapolazione in linea retta, solo indicativa. "
+              "«Su LIRU» = ora stimata di arrivo, estrapolazione in linea retta con incertezza di ±30' (dati orari). Conv non è mai inferiore al fenomeno previsto (TSRA almeno Moderato). "
               "Le mappe dei settori senza fenomeni sono omesse.")
     return f"""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.3</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.4</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
