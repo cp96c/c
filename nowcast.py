@@ -337,7 +337,14 @@ th{font-size:13px;text-align:left;padding:4px}td{padding:3px;vertical-align:top}
 .s{font-size:12px;color:var(--mut)}
 pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .warn{border-left:4px solid #c0392b}
-#map{height:min(68vh,440px);border-radius:8px}.ctl{display:flex;gap:8px;align-items:center;margin-top:6px}
+#map{height:min(68vh,440px);border-radius:8px}
+.compass{display:grid;grid-template-columns:minmax(64px,1fr) minmax(0,3.2fr) minmax(64px,1fr);gap:4px}
+.compass #map{height:auto;aspect-ratio:1;min-height:190px}
+.cb{border-radius:8px;padding:4px 5px;font-size:11px;line-height:1.3;min-height:70px;overflow:hidden}
+.cb b{font-size:13px}.cb .cd{font-weight:700;font-size:12px}
+.chip{display:inline-block;width:14px;height:14px;border-radius:50%;font-size:9px;text-align:center;line-height:14px;margin:2px 2px 0 0;color:#000}
+.k0{background:var(--m0)}.k1{background:var(--m1)}.k2{background:var(--m2)}.k3{background:var(--m3)}.kn{background:var(--mn)}
+summary{cursor:pointer;font-weight:600;margin:12px 0 6px}.ctl{display:flex;gap:8px;align-items:center;margin-top:6px}
 .ctl input[type=range]{flex:1}.ctl button{font-size:18px;padding:2px 10px}.ctl select{font-size:14px}
 .stale{color:#c0392b;font-weight:700;font-size:14px}
 .hd{display:flex;gap:8px;align-items:center;margin-bottom:6px}.sn{font-size:18px}
@@ -491,13 +498,13 @@ def sector_card(sec, by, now):
 
 
 MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<div class="card"><div id="map"></div>
+<div class="card">__COMPASS__
 <div class="ctl"><button id="pl">⏸</button><input type="range" id="sl" min="0" max="0" value="0"><b id="tl">…</b></div>
 <div class="ctl"><label><input type="checkbox" id="cr" checked> Radar</label>
 <select id="cs"><option value="geocolour">Nuvole · colori</option><option value="ir">Nuvole · infrarosso</option><option value="">Nuvole · no</option></select></div>
 <div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultime ore, nessuna previsione).
 Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Mappa © OpenStreetMap, © CARTO.
-Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto.</div></div>
+Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto. Riquadri = fenomeno peggiore del settore; C = convezione, V = vento (verde → rosso).</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>(function(){var D=__DATA__,C=D.c,$=function(i){return document.getElementById(i)};
 var map=L.map("map").setView(C,8),dark=matchMedia("(prefers-color-scheme:dark)").matches;
@@ -536,6 +543,28 @@ def map_data(points, sat):
     return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}}
 
 
+def compass_box(sec, by, now):
+    pts = [by[(sec, r)] for r in RINGS_NM]
+    w = max(pts, key=lambda p: RANK.get(p["ph"], 0))
+    lv = lambda key: max((p[key] for p in pts if p[key] is not None), default=None)
+    chip = lambda lab, v: f'<span class="chip k{"n" if v is None else v}">{lab}</span>'
+    chips = chip("C", lv("conv")) + chip("V", lv("windlvl"))
+    if not w["ph"]:
+        return f'<div class="cb cn"><b>{sec}</b><br><span class="s">nessun fenomeno</span><br>{chips}</div>'
+    t = f'<b>{sec}</b><br><span class="cd">{w["ph"]}</span><br>{w["ph_time"]} · {w["ring"]} NM'
+    if w["motion"]:
+        t += f'<br>→ {w["motion"][0]} {w["motion"][1]:.0f} kt'
+    if w["eta"] is not None:
+        t += f'<br>LIRU {arrival_text(w, now).split(" ")[0]}'
+    return f'<div class="cb c{pheno_cls(w["ph"])}">{t}<br>{chips}</div>'
+
+
+def compass_html(by, now):
+    box = lambda sc: compass_box(sc, by, now)
+    return ('<div class="compass">' + box("NW") + box("N") + box("NE") + box("W") + '<div id="map"></div>'
+            + box("E") + box("SW") + box("S") + box("SE") + "</div>")
+
+
 def missing_note(missing):
     if not missing:
         return ""
@@ -570,7 +599,7 @@ def render(points, metars, now, missing=(), sat=None):
               'GitHub ha ritardato l\'aggiornamento: non fidarti di questa pagina.";}'
               'else{e.className="mut";e.textContent="Dati generati "+m+" min fa";}}'
               'u();setInterval(u,20000);})();</script>').replace("EPOCH", str(int(now.timestamp())))
-    map_card = MAP_HTML.replace("__DATA__", json.dumps(map_data(points, sat)))
+    map_card = MAP_HTML.replace("__COMPASS__", compass_html(by, now)).replace("__DATA__", json.dumps(map_data(points, sat)))
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
@@ -580,7 +609,7 @@ def render(points, metars, now, missing=(), sat=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.5</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.6</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
@@ -588,8 +617,7 @@ Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi
 <div class="card"><b>Regime:</b> {html.escape(regime(points))}<br>{top}<br>
 <b>LIRU:</b> {liru_ph} · <span class="s">CAPE {fmt(center["cape"])} J/kg · raffiche {fmt(center["gust"])} kt ·
 zero termico ~{fmt(center["frz"])} m</span>{missing_note(missing)}</div>
-<h2>Settori, dal più severo</h2>
-{cards}
+<details><summary>Dettaglio per settore (25/50 NM, CAPE, raffiche, mappe)</summary>{cards}</details>
 <div class="mut">{legend}</div>
 <h2>METAR</h2><div class="card">{metar_html}</div>
 </body></html>"""
