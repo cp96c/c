@@ -124,6 +124,61 @@ def trim_past(series, now):
                     h[key] = h[key][k:]
 
 
+GRID_N, GRID_REFRESH_MIN = 13, 100
+PALETTE = [[0.1, [158, 213, 245]], [0.5, [79, 163, 232]], [1, [47, 111, 214]], [2.5, [31, 191, 154]],
+           [5, [255, 225, 77]], [10, [255, 157, 46]], [20, [232, 65, 46]], [40, [181, 23, 158]]]   # mm/h, tipo radar
+
+
+def grid_points():
+    cs = math.cos(math.radians(CENTER[0]))
+    return [(round(CENTER[0] + (-50 + 100 * j / (GRID_N - 1)) / 60, 3),
+             round(CENTER[1] + (-50 + 100 * i / (GRID_N - 1)) / (60 * cs), 3))
+            for j in range(GRID_N) for i in range(GRID_N)]       # da sud a nord, da ovest a est
+
+
+def fetch_grid(now):
+    path, old = DOCS / "grid.json", None
+    try:
+        if path.exists():
+            old = json.loads(path.read_text())
+            if old.get("n") == GRID_N and (now - dt.datetime.fromisoformat(old["ts"])).total_seconds() < GRID_REFRESH_MIN * 60:
+                return old
+        pts, P, C, times = grid_points(), [], [], None
+        for k in range(0, len(pts), 45):
+            ch = pts[k:k + 45]
+            r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=40, params={
+                "latitude": ",".join(str(a) for a, _ in ch), "longitude": ",".join(str(b) for _, b in ch),
+                "hourly": "precipitation,weather_code", "models": MODEL, "timezone": "UTC", "forecast_hours": HORIZON_H + 3})
+            if r.status_code != 200:
+                raise RuntimeError(f"Open-Meteo {r.status_code}: {r.text[:200]}")
+            d = r.json()
+            for loc in (d if isinstance(d, list) else [d]):
+                times = times or loc["hourly"]["time"]
+                P.append(loc["hourly"]["precipitation"])
+                C.append(loc["hourly"]["weather_code"])
+        g = {"n": GRID_N, "ts": now.isoformat(timespec="seconds"), "t": times,
+             "p": [[round(P[c][h] or 0, 2) for c in range(len(P))] for h in range(len(times))],
+             "c": [[int(C[c][h] or 0) for c in range(len(C))] for h in range(len(times))]}
+        DOCS.mkdir(exist_ok=True)
+        path.write_text(json.dumps(g, separators=(",", ":")))
+        return g
+    except Exception as e:  # noqa: BLE001
+        print("griglia: non riuscita:", e)
+        return old
+
+
+def grid_for_page(g, now):
+    if not g:
+        return None
+    ref = now.strftime("%Y-%m-%dT%H:%M")
+    idx = [i for i, t in enumerate(g["t"]) if t > ref][:HORIZON_H]
+    if not idx:
+        return None
+    la, lo = 50 / 60, 50 / (60 * math.cos(math.radians(CENTER[0])))
+    return {"n": g["n"], "t": [g["t"][i] for i in idx], "p": [g["p"][i] for i in idx], "c": [g["c"][i] for i in idx],
+            "b": [[CENTER[0] - la, CENTER[1] - lo], [CENTER[0] + la, CENTER[1] + lo]]}
+
+
 def missing_vars(series):
     return [v for v in EXTRA if not any(_vals(s.get("hourly", {}).get(v)) for s in series)]
 
@@ -562,7 +617,8 @@ MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/lib
 <div class="ctl"><button id="pl">⏸</button><input type="range" id="sl" min="0" max="0" value="0"><b id="tl">…</b></div>
 <div class="ctl"><label><input type="checkbox" id="cr" checked> Radar</label>
 <select id="cs"><option value="geocolour">Nuvole · colori</option><option value="ir">Nuvole · infrarosso</option><option value="">Nuvole · no</option></select></div>
-<div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultime ore, nessuna previsione).
+<div class="ctl s" id="lg"></div>
+<div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultima ora). PREVISIONE = precipitazione oraria del modello ICON-EU con scala colori simile al radar (celle di circa 15 km, meno precisa del radar); cerchio nero = temporale secondo il modello.
 Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Mappa © OpenStreetMap, © CARTO.
 Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto. Riquadri = fenomeno peggiore del settore; C = convezione, V = vento (verde → rosso).</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -575,20 +631,27 @@ var col=["#4caf50","#e6c200","#f08a24","#d32f2f"];
 D.l.forEach(function(l){L.polyline(l,{color:"#666",weight:1,opacity:.5}).addTo(map)});
 L.circleMarker(C,{radius:5,color:"#000",fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip("LIRU",{permanent:true,direction:"right"});
 D.a.forEach(function(a){L.circleMarker([a[1],a[2]],{radius:3,color:"#333",weight:1,fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip(a[0],{permanent:true,direction:"bottom",offset:[0,4]})});
-D.p.forEach(function(p){L.circleMarker([p.lat,p.lon],{radius:7,color:"#000",weight:1,fillColor:col[p.c],fillOpacity:.95}).addTo(map)
-.bindTooltip(p.ph+" "+p.t,{permanent:true,direction:"top",offset:[0,-6]});
-if(p.m!=null){var d=Math.min(p.k/2,26)*1852,a=p.m*Math.PI/180,la=p.lat+d*Math.cos(a)/111320,lo=p.lon+d*Math.sin(a)/(111320*Math.cos(p.lat*Math.PI/180));
-L.polyline([[p.lat,p.lon],[la,lo]],{color:"#000",weight:2}).addTo(map);
-L.marker([la,lo],{icon:L.divIcon({className:"",iconSize:[16,16],iconAnchor:[8,8],html:'<div style="transform:rotate('+p.m+'deg);font-size:16px;line-height:16px;text-align:center">▲</div>'})}).addTo(map)}});
-var LAY={geocolour:"mtg_fd:rgb_geocolour",ir:"mtg_fd:ir105_hrfi"},fr=[],rad=[],sat=[],sk="geocolour",ix=0,tm=null,run=true;
+var LAY={geocolour:"mtg_fd:rgb_geocolour",ir:"mtg_fd:ir105_hrfi"},fr=[],rad=[],sat=[],sk="geocolour",ix=0,tm=null,run=true,nr=0,G=[],TS=[];
+$("lg").innerHTML=D.pal.map(function(a){return '<span style="background:rgb('+a[1]+');padding:1px 6px;color:#000">'+a[0]+'</span>'}).join("")+" mm/h";
 function mkSat(){sat.forEach(function(l){map.removeLayer(l)});sat=[];var k=$("cs").value;if(!k)return;
 (D.s[k]||[]).forEach(function(t){sat.push(L.tileLayer.wms("https://view.eumetsat.int/geoserver/wms",{layers:LAY[k],format:"image/png",version:"1.3.0",time:t,pane:"sat",opacity:0}).addTo(map))});show(ix)}
-function show(i){ix=i;if(!fr.length)return;var T=fr[i];$("sl").value=i;$("tl").textContent=new Date(T*1000).toISOString().substr(11,5)+"Z";
-rad.forEach(function(l,k){l.setOpacity(k==i&&$("cr").checked?.7:0)});
+function col(v){var c=null;D.pal.forEach(function(a){if(v>=a[0])c=a[1]});return c}
+function mkG(h){var g=D.g,n=g.n,S=130,cv=document.createElement("canvas");cv.width=cv.height=S;var cx=cv.getContext("2d"),im=cx.createImageData(S,S),p=g.p[h];
+for(var y=0;y<S;y++)for(var x=0;x<S;x++){var gx=x/(S-1)*(n-1),gy=(1-y/(S-1))*(n-1),i=Math.min(Math.floor(gx),n-2),j=Math.min(Math.floor(gy),n-2),fx=gx-i,fy=gy-j,
+v=p[j*n+i]*(1-fx)*(1-fy)+p[j*n+i+1]*fx*(1-fy)+p[(j+1)*n+i]*(1-fx)*fy+p[(j+1)*n+i+1]*fx*fy,c=col(v),o=(y*S+x)*4;
+if(c){im.data[o]=c[0];im.data[o+1]=c[1];im.data[o+2]=c[2];im.data[o+3]=210}}
+cx.putImageData(im,0,0);return L.imageOverlay(cv.toDataURL(),g.b,{pane:"rad",opacity:0,interactive:false}).addTo(map)}
+function mkTS(h){var g=D.g,n=g.n,s=g.b[0],e=g.b[1],pts=[];
+g.c[h].forEach(function(c,k){if(c>=95){var i=k%n,j=Math.floor(k/n);pts.push(L.circleMarker([s[0]+(e[0]-s[0])*j/(n-1),s[1]+(e[1]-s[1])*i/(n-1)],{radius:6,color:"#000",weight:2,fill:false,interactive:false}))}});return L.layerGroup(pts)}
+function addF(){if(!D.g)return;D.g.t.forEach(function(t,h){fr.push(Date.parse(t+":00Z")/1000);G.push(mkG(h));TS.push(mkTS(h))})}
+function show(i){ix=i;if(!fr.length)return;var T=fr[i],F=i>=nr,h=i-nr;$("sl").value=i;
+$("tl").textContent=(F?"PREVISIONE entro le ":"")+new Date(T*1000).toISOString().substr(11,5)+"Z";
+rad.forEach(function(l,k){l.setOpacity(!F&&k==i&&$("cr").checked?.7:0)});
+G.forEach(function(l,k){l.setOpacity(F&&k==h?.8:0)});TS.forEach(function(g,k){if(F&&k==h)g.addTo(map);else map.removeLayer(g)});
 var k=$("cs").value,ts=D.s[k]||[],b=-1;ts.forEach(function(t,j){if(Date.parse(t)/1000<=T+300)b=j});if(b<0)b=0;
-sat.forEach(function(l,j){l.setOpacity(j==b?.8:0)})}
+sat.forEach(function(l,j){l.setOpacity(!F&&j==b?.8:0)})}
 function step(){if(!run)return;show((ix+1)%fr.length);tm=setTimeout(step,ix==fr.length-1?1800:600)}
-function go(){$("sl").max=Math.max(fr.length-1,0);ix=fr.length-1;mkSat();show(ix);tm=setTimeout(step,900)}
+function go(){nr=fr.length;addF();$("sl").max=Math.max(fr.length-1,0);ix=Math.max(nr-1,0);mkSat();show(ix);tm=setTimeout(step,900)}
 fetch("https://api.rainviewer.com/public/weather-maps.json").then(function(r){return r.json()}).then(function(j){
 (j.radar.past||[]).slice(-7).forEach(function(f){fr.push(f.time);rad.push(L.tileLayer(j.host+f.path+"/256/{z}/{x}/{y}/2/1_1.png",{pane:"rad",opacity:0,maxNativeZoom:7,maxZoom:12}).addTo(map))});go()})
 .catch(function(){fr=(D.s.ir||D.s.geocolour||[]).map(function(t){return Date.parse(t)/1000});if(!fr.length)$("tl").textContent="radar e nuvole non disponibili";go()});
@@ -597,11 +660,12 @@ $("sl").oninput=function(){run=false;$("pl").textContent="▶";clearTimeout(tm);
 $("cr").onchange=function(){show(ix)};$("cs").onchange=mkSat})();</script>"""
 
 
-def map_data(points, sat):
+def map_data(points, sat, grid=None):
     pts = [{"lat": p["lat"], "lon": p["lon"], "ph": p["ph"], "c": pheno_cls(p["ph"]), "t": p["ph_time"],
             "m": p["mdeg"], "k": p["mkt"]} for p in points if p["ph"]]
     lines = [[list(CENTER), list(destination(CENTER[0], CENTER[1], b + 22.5, 50))] for b in SECTORS.values()]
-    return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}, "a": [[k, v[0], v[1]] for k, v in AIRPORTS.items()]}
+    return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}, "a": [[k, v[0], v[1]] for k, v in AIRPORTS.items()],
+            "g": grid, "pal": PALETTE}
 
 
 def compass_box(sec, by, now):
@@ -647,7 +711,7 @@ def missing_note(missing):
     return n + "</div>"
 
 
-def render(points, metars, now, missing=(), sat=None):
+def render(points, metars, now, missing=(), sat=None, grid=None):
     center = points[0]
     by = {(p["sector"], p["ring"]): p for p in points[1:]}
     ranked = sorted((p for p in points[1:] if p["conv"] is not None),
@@ -668,7 +732,7 @@ def render(points, metars, now, missing=(), sat=None):
               'GitHub ha ritardato l\'aggiornamento: non fidarti di questa pagina.";}'
               'else{e.className="mut";e.textContent="Dati generati "+m+" min fa";}}'
               'u();setInterval(u,20000);})();</script>').replace("EPOCH", str(int(now.timestamp())))
-    map_card = MAP_HTML.replace("__COMPASS__", compass_html(by, now)).replace("__DATA__", json.dumps(map_data(points, sat)))
+    map_card = MAP_HTML.replace("__COMPASS__", compass_html(by, now)).replace("__DATA__", json.dumps(map_data(points, sat, grid_for_page(grid, now))))
     metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
@@ -678,7 +742,7 @@ def render(points, metars, now, missing=(), sat=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.7</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.8</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
@@ -705,10 +769,11 @@ def main():
     missing = missing_vars(series)
     metars = fetch_metar()
     sat = sat_times()
+    grid = fetch_grid(now)
 
     DOCS.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
-    (DOCS / "index.html").write_text(render(points, metars, now, missing, sat), encoding="utf-8")
+    (DOCS / "index.html").write_text(render(points, metars, now, missing, sat, grid), encoding="utf-8")
 
     keep = ("name", "cape", "cin", "li", "gust", "wind", "precip", "frz", "conv", "windlvl", "ph", "ph_i", "mdeg", "mkt", "eta")
     row = {"ts": now.isoformat(timespec="seconds"), "model": MODEL, "missing": missing,
