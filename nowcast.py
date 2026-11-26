@@ -17,6 +17,7 @@ import datetime as dt
 import html
 import json
 import math
+import os
 import pathlib
 
 import requests
@@ -33,7 +34,7 @@ HOURLY = [
 ]
 # Variabili opzionali: se una non e' disponibile la pagina funziona lo stesso
 EXTRA = ["showers", "weather_code", "temperature_2m", "wind_speed_700hPa", "wind_direction_700hPa",
-         "wind_direction_10m", "dew_point_2m", "cloud_cover_low"]
+         "wind_direction_10m", "dew_point_2m", "cloud_cover_low", "pressure_msl"]
 TS_CAPE_MIN = 500      # J/kg: sotto questo valore non si segnala temporale
 HAIL_CAPE_MIN = 1500   # J/kg: sopra, con pioggia forte, si segnala grandine possibile
 # Scala di severita' crescente (numero = posizione). Ordine scelto da te, neve scelta da me.
@@ -177,6 +178,73 @@ def grid_for_page(g, now):
     la, lo = 50 / 60, 50 / (60 * math.cos(math.radians(CENTER[0])))
     return {"n": g["n"], "t": [g["t"][i] for i in idx], "p": [g["p"][i] for i in idx], "c": [g["c"][i] for i in idx],
             "b": [[CENTER[0] - la, CENTER[1] - lo], [CENTER[0] + la, CENTER[1] + lo]]}
+
+
+def cached(name, max_min, fn, now):
+    """Rilegge docs/<name>.json se piu' recente di max_min minuti, altrimenti lo rigenera (e in caso di errore usa la copia vecchia)."""
+    path, old = DOCS / f"{name}.json", None
+    try:
+        if path.exists():
+            old = json.loads(path.read_text())
+            if (now - dt.datetime.fromisoformat(old["ts"])).total_seconds() < max_min * 60:
+                return old["data"]
+        data = fn()
+        DOCS.mkdir(exist_ok=True)
+        path.write_text(json.dumps({"ts": now.isoformat(timespec="seconds"), "data": data}, separators=(",", ":")))
+        return data
+    except Exception as e:  # noqa: BLE001
+        print(f"{name}: aggiornamento non riuscito ({e})")
+        if old:
+            return old["data"]
+        raise
+
+
+def _rdp(pts, eps):
+    if len(pts) < 3:
+        return pts
+    (x1, y1), (x2, y2) = pts[0], pts[-1]
+    dx, dy = x2 - x1, y2 - y1
+    L = math.hypot(dx, dy) or 1e-12
+    dm, ix = 0, 0
+    for i in range(1, len(pts) - 1):
+        d = abs(dy * pts[i][0] - dx * pts[i][1] + x2 * y1 - y2 * x1) / L
+        if d > dm:
+            dm, ix = d, i
+    return _rdp(pts[:ix + 1], eps)[:-1] + _rdp(pts[ix:], eps) if dm > eps else [pts[0], pts[-1]]
+
+
+def fetch_airspace():
+    """Spazi aerei da OpenAIP (serve OPENAIP_API_KEY). Solo contorni, indicativi."""
+    key = os.environ.get("OPENAIP_API_KEY")
+    if not key:
+        return None
+    la, lo = 55 / 60, 55 / (60 * math.cos(math.radians(CENTER[0])))
+    bb = (CENTER[1] - lo, CENTER[0] - la, CENTER[1] + lo, CENTER[0] + la)
+    items, page = [], 1
+    while page <= 4:
+        r = requests.get("https://api.core.openaip.net/api/airspaces", timeout=60, headers={"x-openaip-api-key": key},
+                         params={"bbox": ",".join(f"{v:.3f}" for v in bb), "limit": 500, "page": page})
+        r.raise_for_status()
+        d = r.json()
+        items += d.get("items", [])
+        if page >= d.get("totalPages", 1):
+            break
+        page += 1
+    out = []
+    for a in items:
+        if a.get("type") in (10, 11, 12, 15, 16):            # FIR/UIR/ADIZ/aerovie: troppo grandi, tolte
+            continue
+        g = a.get("geometry") or {}
+        polys = [g["coordinates"]] if g.get("type") == "Polygon" else g.get("coordinates", []) if g.get("type") == "MultiPolygon" else []
+        rings = []
+        for p in polys:
+            ring = [(x[0], x[1]) for x in p[0]]
+            if any(bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3] for x, y in ring):
+                rings.append([[round(x, 3), round(y, 3)] for x, y in _rdp(ring, 0.002)])
+        if rings:
+            out.append({"n": a.get("name", "?"), "t": a.get("type"), "r": rings})
+    print("spazi aerei:", len(out))
+    return out
 
 
 def missing_vars(series):
@@ -347,7 +415,8 @@ def analyse(points, series):
             p["hrs"].append({"t": _at(h, "time", i), "ph": codes[i], "m": (d + 180) % 360 if d is not None else None, "k": v,
                              "wd": _at(h, "wind_direction_10m", i), "ws": _at(h, "wind_speed_10m", i),
                              "wg": _at(h, "wind_gusts_10m", i), "T": _at(h, "temperature_2m", i),
-                             "Td": _at(h, "dew_point_2m", i), "cl": _at(h, "cloud_cover_low", i)})
+                             "Td": _at(h, "dew_point_2m", i), "cl": _at(h, "cloud_cover_low", i),
+                             "P": _at(h, "pressure_msl", i)})
         ranked = [(RANK[c], c) for c in codes if c]
         p["ph"], p["ph_i"], p["ph_time"], p["motion"] = None, None, None, None
         p["mdeg"], p["mkt"], p["eta"], p["ph_ts"] = None, None, None, None
@@ -400,7 +469,8 @@ th{font-size:13px;text-align:left;padding:4px}td{padding:3px;vertical-align:top}
 .s{font-size:12px;color:var(--mut)}
 pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .warn{border-left:4px solid #c0392b}
-#map{height:min(68vh,440px);border-radius:8px}
+#map{width:100%;aspect-ratio:1;max-height:82vh;border-radius:8px}
+.sl{font-weight:700;font-size:11px;text-align:center;line-height:1.15;color:var(--fg);text-shadow:0 0 3px var(--mapbg),0 0 3px var(--mapbg);pointer-events:none}
 .compass{display:grid;grid-template-columns:minmax(64px,1fr) minmax(0,3.2fr) minmax(64px,1fr);gap:4px}
 .compass #map{height:auto;aspect-ratio:1;min-height:190px}
 .cb{border-radius:8px;padding:4px 5px;font-size:11px;line-height:1.3;min-height:70px;overflow:hidden}
@@ -559,28 +629,62 @@ def _cloud(h, code):
     return f"{amt}{base:03d}" + ("CB" if code and "TS" in code else "")
 
 
+def _elems(h, code):
+    ws, wg, wd = h["ws"], h["wg"], h["wd"]
+    w = "VRB" if wd is None else f"{(int(round(wd / 10.0)) * 10) % 360 or 360:03d}"
+    w += "//" if ws is None else f"{int(round(ws)):02d}"
+    if ws is not None and wg is not None and wg - ws >= 10:
+        w += f"G{int(round(wg)):02d}"
+    return (w + "KT", f"{VIS.get(code, 9999):04d}", code or "", _cloud(h, code))
+
+
+def _worst(near, far, i):
+    c = [q["hrs"][i]["ph"] for q in (near, far) if len(q["hrs"]) > i and q["hrs"][i]["ph"]]
+    return max(c, key=lambda x: RANK[x]) if c else None
+
+
+def metar_text(label, h, code, now):
+    """METAR FITTIZIO dal modello (ora corrente)."""
+    tt = lambda v: "//" if v is None else ("M" if round(v) < 0 else "") + f"{abs(round(v)):02d}"
+    q = "" if h["P"] is None else f" Q{int(round(h['P']))}"
+    return f"METAR {label} {now:%d%H%M}Z AUTO " + " ".join(x for x in _elems(h, code) if x) + f" {tt(h['T'])}/{tt(h['Td'])}{q}"
+
+
+def sector_metar(sec, by, now):
+    near, far = by[(sec, RINGS_NM[0])], by[(sec, RINGS_NM[1])]
+    return metar_text(f"LIRU-{sec}", near["hrs"][0], _worst(near, far, 0), now) if near["hrs"] else ""
+
+
 def taf_text(sec, by, now):
-    """TAF FITTIZIO costruito dai dati del modello (vento al punto a 25 NM, fenomeno peggiore tra 25 e 50 NM)."""
+    """TAF FITTIZIO: gruppo base + TEMPO (fenomeni brevi) e BECMG (cambi che restano)."""
     near, far = by[(sec, RINGS_NM[0])], by[(sec, RINGS_NM[1])]
     hrs = near["hrs"]
     if not hrs or not hrs[0]["t"]:
         return "Dati insufficienti per il TAF."
     T = lambda h: dt.datetime.strptime(h["t"], "%Y-%m-%dT%H:%M")
-    groups = []
+    z = lambda i: T(hrs[i]) - dt.timedelta(hours=1)               # inizio dell'ora i
+    segs = []
     for i, h in enumerate(hrs):
-        cands = [q["hrs"][i]["ph"] for q in (near, far) if len(q["hrs"]) > i and q["hrs"][i]["ph"]]
-        code = max(cands, key=lambda c: RANK[c]) if cands else None
-        ws, wg, wd = h["ws"], h["wg"], h["wd"]
-        w = "VRB" if wd is None else f"{(int(round(wd / 10.0)) * 10) % 360 or 360:03d}"
-        w += "//" if ws is None else f"{int(round(ws)):02d}"
-        if ws is not None and wg is not None and wg - ws >= 10:
-            w += f"G{int(round(wg)):02d}"
-        groups.append(" ".join(x for x in (w + "KT", f"{VIS.get(code, 9999):04d}", code or "", _cloud(h, code)) if x))
-    t0, t1 = T(hrs[0]) - dt.timedelta(hours=1), T(hrs[-1])
-    lines = [f"TAF LIRU-{sec} {now:%d%H%M}Z {t0:%d%H}/{t1:%d%H} {groups[0]}"]
-    for i in range(1, len(groups)):
-        if groups[i] != groups[i - 1]:
-            lines.append(f"FM{(T(hrs[i]) - dt.timedelta(hours=1)):%d%H}00 {groups[i]}")
+        e = _elems(h, _worst(near, far, i))
+        if segs and segs[-1][2] == e:
+            segs[-1][1] = i
+        else:
+            segs.append([i, i, e])
+    lines = [f"TAF LIRU-{sec} {now:%d%H%M}Z {z(0):%d%H}/{T(hrs[-1]):%d%H} " + " ".join(x for x in segs[0][2] if x)]
+    prev = segs[0][2]
+    for k, (a, b, e) in enumerate(segs[1:], 1):
+        if e == prev:
+            continue
+        last = k == len(segs) - 1
+        sig = bool(e[2]) and RANK[e[2]] >= 6
+        if b - a + 1 <= 2 and (not last or sig):
+            diff = [x for x, p in zip(e, prev) if x != p and x]
+            if diff:
+                lines.append(f"TEMPO {z(a):%d%H}/{T(hrs[b]):%d%H} " + " ".join(diff))
+        else:
+            parts = [x or ("NSW" if j == 2 else "") for j, (x, p) in enumerate(zip(e, prev)) if x != p]
+            lines.append(f"BECMG {z(a):%d%H}/{(z(a) + dt.timedelta(hours=1)):%d%H} " + " ".join(x for x in parts if x))
+            prev = e
     return "\n".join(lines)
 
 
@@ -608,8 +712,8 @@ def sector_card(sec, by, now):
     hours = by[(sec, RINGS_NM[0])]["hrs"]
     btns = "".join(f'<button class="hb{" on" if i == 0 else ""}" data-h="{i}">{(h["t"] or "?")[11:13]}Z</button>'
                    for i, h in enumerate(hours))
-    return (f'<div class="card sp" id="sp-{sec}" hidden>{head}<pre class="taf">{html.escape(taf_text(sec, by, now))}</pre>'
-            f'<div class="s">TAF FITTIZIO generato dal modello: non è un TAF ufficiale, non usarlo per la navigazione. '
+    return (f'<div class="card sp" id="sp-{sec}" hidden>{head}<pre class="taf">{html.escape(sector_metar(sec, by, now) + chr(10) + chr(10) + taf_text(sec, by, now))}</pre>'
+            f'<div class="s">METAR e TAF FITTIZI generati dal modello: non sono ufficiali, non usarlo per la navigazione. '
             f'Immagine: situazione prevista nell\'ora che termina all\'orario scelto.</div>'
             f'<div class="ctl">{btns}</div><div class="sc">{sector_map(sec, by)}<div class="info">{rings}</div></div></div>')
 
@@ -618,11 +722,12 @@ MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/lib
 <div class="card">__COMPASS__
 <div class="ctl"><button id="pl">⏸</button><input type="range" id="sl" min="0" max="0" value="0"><b id="tl">…</b></div>
 <div class="ctl"><label><input type="checkbox" id="cr" checked> Radar</label>
-<select id="cs"><option value="geocolour">Nuvole · colori</option><option value="ir">Nuvole · infrarosso</option><option value="">Nuvole · no</option></select></div>
+<select id="cs"><option value="">Nuvole · no</option><option value="ir">Nuvole · infrarosso</option><option value="geocolour">Nuvole · colori</option></select>
+<label><input type="checkbox" id="ca" checked> Spazi aerei</label></div>
 <div class="ctl s" id="lg"></div>
 <div class="s" id="st"></div>
 <div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultima ora). PREVISIONE = precipitazione oraria del modello ICON-EU con scala colori simile al radar (celle di circa 15 km, meno precisa del radar); cerchio nero = temporale secondo il modello.
-Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Sfondo: Natural Earth (costa e laghi).
+Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Sfondo: Natural Earth. Spazi aerei (se attivi): OpenAIP, uso non commerciale, solo indicativi, non per la navigazione. Tocca un settore sulla mappa per METAR e TAF.
 Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto. Riquadri = fenomeno peggiore del settore; C = convezione, V = vento (verde → rosso).</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>(function(){var D=__DATA__,C=D.c,$=function(i){return document.getElementById(i)};
@@ -637,6 +742,19 @@ D.geo.coast.forEach(function(l){L.polyline(ll(l),{color:fg,weight:1.6,opacity:.8
 D.l.forEach(function(l){L.polyline(l,{color:"#666",weight:1,opacity:.5}).addTo(map)});
 L.circleMarker(C,{radius:5,color:"#000",fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip("LIRU",{permanent:true,direction:"right"});
 D.a.forEach(function(a){L.circleMarker([a[1],a[2]],{radius:3,color:"#333",weight:1,fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip(a[0],{permanent:true,direction:"bottom",offset:[0,4]})});
+var SC=["#4caf50","#e6c200","#f08a24","#d32f2f"],SW={},SL={};
+function openSec(k){var id="sp-"+k;document.querySelectorAll(".sp").forEach(function(p){p.hidden=p.id!=id});
+var e=document.getElementById(id);if(e)e.scrollIntoView({behavior:"smooth",block:"start"});Object.keys(SW).forEach(function(x){SW[x].setStyle({weight:x==k?3:1})})}
+Object.keys(D.sec).forEach(function(k){var s=D.sec[k];SW[k]=L.polygon(s.poly,{color:"#888",weight:1,fillColor:"#888",fillOpacity:.05}).addTo(map);SW[k].on("click",function(){openSec(k)});
+SL[k]=L.marker(s.lab,{interactive:false,icon:L.divIcon({className:"sl",html:"",iconSize:[70,30],iconAnchor:[35,15]})}).addTo(map)});
+function secs(F,h){Object.keys(D.sec).forEach(function(k){var s=D.sec[k],j=F?s.t.indexOf(D.g.t[h]):0;if(j<0)j=Math.min(h,s.t.length-1);
+var c=s.k[j],t=s.c[j]||"–";SW[k].setStyle({fillColor:c==null?"#888":SC[c],fillOpacity:c==null?.05:.2});
+SL[k].setIcon(L.divIcon({className:"sl",iconSize:[70,30],iconAnchor:[35,15],html:k+"<br>"+t}))})}
+var AL=L.layerGroup().addTo(map);$("ca").parentNode.style.display="none";
+fetch("airspace.json").then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(j){var AC={4:"#d6336c",13:"#d6336c",7:"#3b82f6",26:"#3b82f6",1:"#ef4444",2:"#ef4444",3:"#ef4444"};
+(j.data||[]).forEach(function(a){a.r.forEach(function(r){L.polygon(ll(r),{color:AC[a.t]||"#8b8f96",weight:1.2,dashArray:"5 3",fill:false}).bindTooltip(a.n,{sticky:true}).addTo(AL)})});
+if((j.data||[]).length)$("ca").parentNode.style.display=""}).catch(function(){});
+$("ca").onchange=function(){this.checked?AL.addTo(map):map.removeLayer(AL)};
 var LAY={geocolour:"mtg_fd:rgb_geocolour",ir:"mtg_fd:ir105_hrfi"},fr=[],rad=[],sat=[],sk="geocolour",ix=0,tm=null,run=true,nr=0,G=[],TS=[];
 $("lg").innerHTML=D.pal.map(function(a){return '<span style="background:rgb('+a[1]+');padding:1px 6px;color:#000">'+a[0]+'</span>'}).join("")+" mm/h";
 function mkSat(){sat.forEach(function(l){map.removeLayer(l)});sat=[];var k=$("cs").value;if(!k)return;
@@ -657,7 +775,7 @@ $("tl").textContent=(F?"PREVISIONE entro le ":"")+new Date(T*1000).toISOString()
 rad.forEach(function(l,k){l.setOpacity(!F&&k==i&&$("cr").checked?.7:0)});
 G.forEach(function(l,k){l.setOpacity(F&&k==h?.8:0)});TS.forEach(function(g,k){if(F&&k==h)g.addTo(map);else map.removeLayer(g)});
 var k=$("cs").value,ts=D.s[k]||[],b=-1;ts.forEach(function(t,j){if(Date.parse(t)/1000<=T+300)b=j});if(b<0)b=0;
-sat.forEach(function(l,j){l.setOpacity(!F&&j==b?.8:0)})}
+sat.forEach(function(l,j){l.setOpacity(!F&&j==b?.8:0)});secs(F,h)}
 function step(){if(!run)return;show((ix+1)%fr.length);tm=setTimeout(step,ix==fr.length-1?1800:600)}
 function go(){nr=fr.length;addF();$("sl").max=Math.max(fr.length-1,0);ix=Math.max(nr-1,0);mkSat();show(ix);tm=setTimeout(step,900)}
 var te=0;
@@ -674,12 +792,24 @@ $("sl").oninput=function(){run=false;$("pl").textContent="▶";clearTimeout(tm);
 $("cr").onchange=function(){show(ix)};$("cs").onchange=mkSat})();</script>"""
 
 
+def sector_data(points):
+    by = {(p["sector"], p["ring"]): p for p in points[1:]}
+    out = {}
+    for sec, brg in SECTORS.items():
+        near, far = by[(sec, RINGS_NM[0])], by[(sec, RINGS_NM[1])]
+        codes = [_worst(near, far, i) for i in range(len(near["hrs"]))]
+        out[sec] = {"t": [h["t"] for h in near["hrs"]], "c": codes, "k": [pheno_cls(c) for c in codes],
+                    "poly": [list(CENTER)] + [list(destination(CENTER[0], CENTER[1], brg - 22.5 + 4.5 * i, 50)) for i in range(11)],
+                    "lab": list(destination(CENTER[0], CENTER[1], brg, 33))}
+    return out
+
+
 def map_data(points, sat, grid=None):
     pts = [{"lat": p["lat"], "lon": p["lon"], "ph": p["ph"], "c": pheno_cls(p["ph"]), "t": p["ph_time"],
             "m": p["mdeg"], "k": p["mkt"]} for p in points if p["ph"]]
     lines = [[list(CENTER), list(destination(CENTER[0], CENTER[1], b + 22.5, 50))] for b in SECTORS.values()]
     return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}, "a": [[k, v[0], v[1]] for k, v in AIRPORTS.items()],
-            "g": grid, "pal": PALETTE, "geo": GEO}
+            "g": grid, "pal": PALETTE, "geo": GEO, "sec": sector_data(points)}
 
 
 def compass_box(sec, by, now):
@@ -699,9 +829,7 @@ def compass_box(sec, by, now):
 
 
 def compass_html(by, now):
-    box = lambda sc: compass_box(sc, by, now)
-    return ('<div class="compass">' + box("NW") + box("N") + box("NE") + box("W") + '<div id="map"></div>'
-            + box("E") + box("SW") + box("S") + box("SE") + "</div>")
+    return '<div id="map"></div>'
 
 
 PANEL_JS = """<script>(function(){var P=document.querySelectorAll(".sp");
@@ -742,12 +870,14 @@ def render(points, metars, now, missing=(), sat=None, grid=None):
     cards = "".join(sector_card(sc, by, now) for sc in order)
     age_js = ('<div id="age" class="mut"></div><script>(function(){var t=EPOCH*1000;function u(){'
               'var m=Math.round((Date.now()-t)/60000),e=document.getElementById("age");'
-              'if(m>30){e.className="stale";e.textContent="ATTENZIONE: dati vecchi di "+m+" min. '
+              'if(m>15){e.className="stale";e.textContent="ATTENZIONE: dati vecchi di "+m+" min. '
               'GitHub ha ritardato l\'aggiornamento: non fidarti di questa pagina.";}'
               'else{e.className="mut";e.textContent="Dati generati "+m+" min fa";}}'
               'u();setInterval(u,20000);})();</script>').replace("EPOCH", str(int(now.timestamp())))
     map_card = MAP_HTML.replace("__COMPASS__", compass_html(by, now)).replace("__DATA__", json.dumps(map_data(points, sat, grid_for_page(grid, now))))
-    metar_html = "".join(f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
+    if not any(k == "LIRU" for k, _ in metars) and center["hrs"]:
+        metars = list(metars) + [("LIRU", metar_text("LIRU", center["hrs"][0], center["hrs"][0]["ph"], now) + "  [FITTIZIO, dal modello: LIRU non ha un METAR ufficiale ora]")]
+    metar_html = "".join(f"<pre>{html.escape(v)}</pre>" if v.startswith(("METAR", "SPECI")) else f"<pre><b>{html.escape(k)}</b> {html.escape(v)}</pre>" for k, v in metars)
     legend = ("Scala di severità crescente: -RA, -DZ, RA, DZ, +RA, -SHRA, SHRA, +SHRA, -TSRA, TSRA, +TSRA, TSGR "
               "(neve: -SN, SN, +SN, SHSN). Freccia = direzione di spostamento (vento a 700 hPa; più lunga = più veloce, accorciata ai bordi della mappa). "
               "«Su LIRU» = ora stimata di arrivo, estrapolazione in linea retta con incertezza di ±30' (dati orari). Conv non è mai inferiore al fenomeno previsto (TSRA almeno Moderato). "
@@ -756,7 +886,7 @@ def render(points, metars, now, missing=(), sat=None, grid=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.9</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v1.0</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
@@ -775,15 +905,20 @@ zero termico ~{fmt(center["frz"])} m</span>{missing_note(missing)}</div>
 def main():
     now = dt.datetime.now(dt.timezone.utc)
     points = build_points()
-    series = fetch_all(points)
+    series = cached("model", 25, lambda: fetch_all(points), now)
     if len(series) != len(points):
         raise RuntimeError(f"Attesi {len(points)} punti, ricevuti {len(series)}")
     trim_past(series, now)
     analyse(points, series)
     missing = missing_vars(series)
     metars = fetch_metar()
-    sat = sat_times()
+    sat = cached("sat", 9, sat_times, now)
     grid = fetch_grid(now)
+    if os.environ.get("OPENAIP_API_KEY"):
+        try:
+            cached("airspace", 1440, fetch_airspace, now)
+        except Exception as e:  # noqa: BLE001
+            print("spazi aerei non disponibili:", e)
 
     DOCS.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
