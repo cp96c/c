@@ -405,6 +405,8 @@ pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:2px 0}
 .compass #map{height:auto;aspect-ratio:1;min-height:190px}
 .cb{border-radius:8px;padding:4px 5px;font-size:11px;line-height:1.3;min-height:70px;overflow:hidden}
 .cb b{font-size:13px}.cb .cd{font-weight:700;font-size:12px}
+.leaflet-tooltip{background:transparent;border:0;box-shadow:none;color:var(--fg);font-size:10px;font-weight:600;padding:0;text-shadow:0 0 3px var(--mapbg),0 0 3px var(--mapbg)}
+.leaflet-tooltip:before{display:none}
 .cb{cursor:pointer}.taf{background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:6px;font-size:12px;white-space:pre-wrap}
 .hb{font-size:13px;padding:3px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg)}.hb.on{background:var(--c1);font-weight:700}
 .chip{display:inline-block;width:14px;height:14px;border-radius:50%;font-size:9px;text-align:center;line-height:14px;margin:2px 2px 0 0;color:#000}
@@ -618,15 +620,19 @@ MAP_HTML = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/lib
 <div class="ctl"><label><input type="checkbox" id="cr" checked> Radar</label>
 <select id="cs"><option value="geocolour">Nuvole · colori</option><option value="ir">Nuvole · infrarosso</option><option value="">Nuvole · no</option></select></div>
 <div class="ctl s" id="lg"></div>
+<div class="s" id="st"></div>
 <div class="s">Radar: <a href="https://www.rainviewer.com/">Weather data by RainViewer</a> (ultima ora). PREVISIONE = precipitazione oraria del modello ICON-EU con scala colori simile al radar (celle di circa 15 km, meno precisa del radar); cerchio nero = temporale secondo il modello.
-Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Mappa © OpenStreetMap, © CARTO.
+Nuvole: Contains modified EUMETSAT Meteosat data (GeoColour: EUMETSAT e NASA). Sfondo: Natural Earth (costa e laghi).
 Cerchi 25/50 NM; punti = fenomeni del modello, freccia = moto. Riquadri = fenomeno peggiore del settore; C = convezione, V = vento (verde → rosso).</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>(function(){var D=__DATA__,C=D.c,$=function(i){return document.getElementById(i)};
-var map=L.map("map").setView(C,8),dark=matchMedia("(prefers-color-scheme:dark)").matches;
-L.tileLayer("https://{s}.basemaps.cartocdn.com/"+(dark?"dark_all":"light_all")+"/{z}/{x}/{y}{r}.png",{maxZoom:12}).addTo(map);
-map.createPane("sat").style.zIndex=250;map.createPane("rad").style.zIndex=260;
-var col=["#4caf50","#e6c200","#f08a24","#d32f2f"];
+var map=L.map("map",{zoomSnap:.25,attributionControl:false}),dark=matchMedia("(prefers-color-scheme:dark)").matches;
+map.fitBounds(L.latLng(C).toBounds(190000));
+var bg=dark?"#1b1d20":"#f3f1ea",fg=dark?"#c9ced4":"#333",ll=function(l){return l.map(function(q){return [q[1],q[0]]})};
+$("map").style.background=bg;
+map.createPane("base").style.zIndex=210;map.createPane("sat").style.zIndex=250;map.createPane("rad").style.zIndex=260;
+D.geo.lakes.forEach(function(r){L.polygon(ll(r),{pane:"base",color:"#5b86b0",weight:1,fillColor:dark?"#1f3a52":"#bcd7ee",fillOpacity:1,interactive:false}).addTo(map)});
+D.geo.coast.forEach(function(l){L.polyline(ll(l),{color:fg,weight:1.6,opacity:.85,interactive:false}).addTo(map)});
 [25,50].forEach(function(r){L.circle(C,{radius:r*1852,color:"#666",weight:1,fill:false,dashArray:"4 4"}).addTo(map)});
 D.l.forEach(function(l){L.polyline(l,{color:"#666",weight:1,opacity:.5}).addTo(map)});
 L.circleMarker(C,{radius:5,color:"#000",fillColor:"#fff",fillOpacity:1}).addTo(map).bindTooltip("LIRU",{permanent:true,direction:"right"});
@@ -635,15 +641,17 @@ var LAY={geocolour:"mtg_fd:rgb_geocolour",ir:"mtg_fd:ir105_hrfi"},fr=[],rad=[],s
 $("lg").innerHTML=D.pal.map(function(a){return '<span style="background:rgb('+a[1]+');padding:1px 6px;color:#000">'+a[0]+'</span>'}).join("")+" mm/h";
 function mkSat(){sat.forEach(function(l){map.removeLayer(l)});sat=[];var k=$("cs").value;if(!k)return;
 (D.s[k]||[]).forEach(function(t){sat.push(L.tileLayer.wms("https://view.eumetsat.int/geoserver/wms",{layers:LAY[k],format:"image/png",version:"1.3.0",time:t,pane:"sat",opacity:0}).addTo(map))});show(ix)}
-function col(v){var c=null;D.pal.forEach(function(a){if(v>=a[0])c=a[1]});return c}
+function rcol(v){var c=null;D.pal.forEach(function(a){if(v>=a[0])c=a[1]});return c}
 function mkG(h){var g=D.g,n=g.n,S=130,cv=document.createElement("canvas");cv.width=cv.height=S;var cx=cv.getContext("2d"),im=cx.createImageData(S,S),p=g.p[h];
 for(var y=0;y<S;y++)for(var x=0;x<S;x++){var gx=x/(S-1)*(n-1),gy=(1-y/(S-1))*(n-1),i=Math.min(Math.floor(gx),n-2),j=Math.min(Math.floor(gy),n-2),fx=gx-i,fy=gy-j,
-v=p[j*n+i]*(1-fx)*(1-fy)+p[j*n+i+1]*fx*(1-fy)+p[(j+1)*n+i]*(1-fx)*fy+p[(j+1)*n+i+1]*fx*fy,c=col(v),o=(y*S+x)*4;
+v=p[j*n+i]*(1-fx)*(1-fy)+p[j*n+i+1]*fx*(1-fy)+p[(j+1)*n+i]*(1-fx)*fy+p[(j+1)*n+i+1]*fx*fy,c=rcol(v),o=(y*S+x)*4;
 if(c){im.data[o]=c[0];im.data[o+1]=c[1];im.data[o+2]=c[2];im.data[o+3]=210}}
 cx.putImageData(im,0,0);return L.imageOverlay(cv.toDataURL(),g.b,{pane:"rad",opacity:0,interactive:false}).addTo(map)}
 function mkTS(h){var g=D.g,n=g.n,s=g.b[0],e=g.b[1],pts=[];
 g.c[h].forEach(function(c,k){if(c>=95){var i=k%n,j=Math.floor(k/n);pts.push(L.circleMarker([s[0]+(e[0]-s[0])*j/(n-1),s[1]+(e[1]-s[1])*i/(n-1)],{radius:6,color:"#000",weight:2,fill:false,interactive:false}))}});return L.layerGroup(pts)}
-function addF(){if(!D.g)return;D.g.t.forEach(function(t,h){fr.push(Date.parse(t+":00Z")/1000);G.push(mkG(h));TS.push(mkTS(h))})}
+function addF(){if(!D.g){$("st").textContent+=" · previsione non disponibile";return}
+D.g.t.forEach(function(t,h){fr.push(Date.parse(t+":00Z")/1000);G.push(mkG(h));TS.push(mkTS(h))});
+$("st").textContent+=" · Previsione: "+D.g.t.length+" immagini, pioggia max "+D.g.p.map(function(a){return Math.max.apply(null,a).toFixed(1)}).join("/")+" mm/h"}
 function show(i){ix=i;if(!fr.length)return;var T=fr[i],F=i>=nr,h=i-nr;$("sl").value=i;
 $("tl").textContent=(F?"PREVISIONE entro le ":"")+new Date(T*1000).toISOString().substr(11,5)+"Z";
 rad.forEach(function(l,k){l.setOpacity(!F&&k==i&&$("cr").checked?.7:0)});
@@ -652,9 +660,15 @@ var k=$("cs").value,ts=D.s[k]||[],b=-1;ts.forEach(function(t,j){if(Date.parse(t)
 sat.forEach(function(l,j){l.setOpacity(!F&&j==b?.8:0)})}
 function step(){if(!run)return;show((ix+1)%fr.length);tm=setTimeout(step,ix==fr.length-1?1800:600)}
 function go(){nr=fr.length;addF();$("sl").max=Math.max(fr.length-1,0);ix=Math.max(nr-1,0);mkSat();show(ix);tm=setTimeout(step,900)}
-fetch("https://api.rainviewer.com/public/weather-maps.json").then(function(r){return r.json()}).then(function(j){
-(j.radar.past||[]).slice(-7).forEach(function(f){fr.push(f.time);rad.push(L.tileLayer(j.host+f.path+"/256/{z}/{x}/{y}/2/1_1.png",{pane:"rad",opacity:0,maxNativeZoom:7,maxZoom:12}).addTo(map))});go()})
-.catch(function(){fr=(D.s.ir||D.s.geocolour||[]).map(function(t){return Date.parse(t)/1000});if(!fr.length)$("tl").textContent="radar e nuvole non disponibili";go()});
+var te=0;
+fetch("https://api.rainviewer.com/public/weather-maps.json").then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json()}).then(function(j){
+var p=(j.radar&&j.radar.past)||[];if(!p.length)throw new Error("nessuna immagine");
+p.slice(-7).forEach(function(f){fr.push(f.time);var l=L.tileLayer(j.host+f.path+"/256/{z}/{x}/{y}/2/1_1.png",{pane:"rad",opacity:0,maxNativeZoom:7,maxZoom:12}).addTo(map);
+l.on("tileerror",function(){te++;$("st").textContent="Radar: "+nr+" immagini, "+te+" tile non caricati"});rad.push(l)});
+$("st").textContent="Radar: "+fr.length+" immagini"})
+.catch(function(e){rad.forEach(function(l){map.removeLayer(l)});rad=[];var q=D.s.ir&&D.s.ir.length?D.s.ir:(D.s.geocolour||[]);
+fr=q.map(function(t){return Date.parse(t)/1000});$("st").textContent="Radar non disponibile ("+(e&&e.message||e)+")"})
+.then(function(){try{go()}catch(e){$("st").textContent+=" · errore: "+e.message}});
 $("pl").onclick=function(){run=!run;this.textContent=run?"⏸":"▶";clearTimeout(tm);if(run)step()};
 $("sl").oninput=function(){run=false;$("pl").textContent="▶";clearTimeout(tm);show(+this.value)};
 $("cr").onchange=function(){show(ix)};$("cs").onchange=mkSat})();</script>"""
@@ -665,7 +679,7 @@ def map_data(points, sat, grid=None):
             "m": p["mdeg"], "k": p["mkt"]} for p in points if p["ph"]]
     lines = [[list(CENTER), list(destination(CENTER[0], CENTER[1], b + 22.5, 50))] for b in SECTORS.values()]
     return {"c": list(CENTER), "p": pts, "l": lines, "s": sat or {}, "a": [[k, v[0], v[1]] for k, v in AIRPORTS.items()],
-            "g": grid, "pal": PALETTE}
+            "g": grid, "pal": PALETTE, "geo": GEO}
 
 
 def compass_box(sec, by, now):
@@ -742,7 +756,7 @@ def render(points, metars, now, missing=(), sat=None, grid=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300"><title>Cruscotto LIRU</title><style>{CSS}</style></head><body>
 <h1>Cruscotto convettivo · LIRU 50 NM</h1>
-<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.8</div>
+<div class="mut">Aggiornato {now:%d/%m %H:%M}Z · modello {MODEL} · orizzonte +{HORIZON_H - 1} h · prototipo v0.9</div>
 {age_js}
 <div class="card warn mut">Supporto informativo. Livelli a regole semplici, non probabilità.
 Non sostituisce briefing, METAR/TAF/SIGMET, ATC, osservazione diretta delle nubi.</div>
