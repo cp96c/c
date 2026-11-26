@@ -2,7 +2,7 @@ name: aggiorna-cruscotto
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,8 @@ jobs:
           python-version: "3.12"
       - run: pip install requests
       - run: python nowcast.py
+        env:
+          OPENAIP_API_KEY: ${{ secrets.OPENAIP_API_KEY }}
       - name: Salva risultati
         run: |
           git config user.name "cruscotto-bot"
